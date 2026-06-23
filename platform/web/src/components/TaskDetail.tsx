@@ -10,9 +10,11 @@ interface Props {
   task: Task;
   onClose: () => void;
   onChanged: () => Promise<void>;
+  /** When true, render as a full inline page instead of a modal overlay. */
+  inline?: boolean;
 }
 
-export function TaskDetail({ task, onClose, onChanged }: Props) {
+export function TaskDetail({ task, onClose, onChanged, inline }: Props) {
   const [tab, setTab] = useState<Tab>("state");
   const [activeRun, setActiveRun] = useState<Run | null>(null);
   const [logs, setLogs] = useState<LogLine[]>([]);
@@ -75,24 +77,24 @@ export function TaskDetail({ task, onClose, onChanged }: Props) {
 
   const isRunning = activeRun?.state === "running" || activeRun?.state === "queued";
 
-  // ESC closes the modal.
+  // ESC closes the modal (no-op in inline mode).
   useEffect(() => {
+    if (inline) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, inline]);
 
-  return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-[2px]"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-      data-testid="task-modal"
+  const inner = (
+    <section
+      className={
+        inline
+          ? "flex-1 min-w-0 bg-surface-850 flex flex-col overflow-hidden"
+          : "w-[min(1000px,92vw)] h-[min(80vh,820px)] rounded-lg border border-surface-700 bg-surface-850 shadow-2xl flex flex-col overflow-hidden"
+      }
     >
-      <section className="w-[min(1000px,92vw)] h-[min(80vh,820px)] rounded-lg border border-surface-700 bg-surface-850 shadow-2xl flex flex-col overflow-hidden">
         <header className="h-12 border-b border-surface-700 px-4 flex items-center gap-3 bg-surface-800">
           <span className="font-mono text-[11px] text-text-muted uppercase tracking-wider">task</span>
           <span className="text-sm font-medium">{task.name}</span>
@@ -172,7 +174,19 @@ export function TaskDetail({ task, onClose, onChanged }: Props) {
           {tab === "caps" && <CapsTab task={task} />}
           {tab === "model" && <ModelTab task={task} onChanged={onChanged} />}
         </div>
-      </section>
+    </section>
+  );
+
+  if (inline) return inner;
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-[2px]"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      data-testid="task-modal"
+    >
+      {inner}
     </div>
   );
 }

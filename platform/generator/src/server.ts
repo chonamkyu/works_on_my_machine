@@ -81,7 +81,7 @@ Decide which of three intents this turn is and reply with ONE JSON object, no ma
     "reply": "<short message about what was removed>"
   }
 
-  Intent "manage_credential" — directly write or remove a credential in the user's vault. Use when the user says "그 키 이걸로 바꿔줘", "AWS 자격증명 등록해줘 {access_key_id, secret_access_key}", "openai 키 지워" etc.
+  Intent "manage_credential" — directly write or remove a credential in the user's vault. Use when the user says e.g. "swap that key with this one", "register my AWS credentials {access_key_id, secret_access_key}", "delete the openai key", etc.
   {
     "intent": "manage_credential",
     "action": "upsert" | "delete",
@@ -101,7 +101,7 @@ Decide which of three intents this turn is and reply with ONE JSON object, no ma
     "label": "default",                      // label to store under
     "credential_kind": "token" | "oauth",    // token = paste a key in the UI; oauth = launch the OAuth flow
     "help_url": "https://unsplash.com/oauth/applications",
-    "instructions": "어디서 발급받고 어떤 권한 필요한지",
+    "instructions": "where to issue the key and what scopes/permissions it needs",
     "follow_up_prompt": "<the original task spec you would build once the key is registered>",
     "reply": "<one-line message to the user>"
   }
@@ -210,8 +210,16 @@ Hard examples:
   - existing posts to Slack daily at 9am, user asks for another daily Slack digest → UPDATE.
   - existing watches GitHub PR_opened in owner/repo, user asks for another PR watcher in same repo → UPDATE.
 
+AGENT CAPABILITIES — handle in chat, not in a separate UI page
+Memory / evolution PRs / task discovery are NOT shown as UI tabs anymore. Handle them inline from the chat:
+- "what did I build about X" / "show me past tasks involving Slack" → answer from history + existing_tasks context with intent="chat".
+- "apply that evolution PR" / "roll it back" → respond with intent="update" pointing at the relevant task, applying or reverting the proposed code (you have main_ts before/after in existing_tasks).
+- "is there anything similar already" / "fork that one" → reply with intent="chat" listing the matches you see in existing_tasks.
+- "turn off both auto-responders" → intent="delete" with the matching ids.
+Use intent="chat" for read-only Q&A; only switch to create/update/delete/manage_credential/request_credential when actually mutating state.
+
 DELETION
-If the user says "삭제해", "지워", "remove", "delete", "꺼줘 (서비스 자체를)", "그거 빼" → respond with intent "delete" and the matching task ids.
+If the user clearly asks to remove a task — "delete it", "remove that", "kill the X", and the same idea in any other language — respond with intent="delete" and the matching task ids.
 Be conservative — only set target_task_ids you are confident the user meant.
 
 CREDENTIAL CHECK — NEVER ship code that depends on a key the user has not registered yet
@@ -221,7 +229,7 @@ If a needed credential is MISSING, reply with intent="chat" and:
   - State which credential is needed (one short sentence)
   - Give the exact registration steps:
       • Provider URL where the user goes to issue the key
-      • Settings → Add credential → connector=<lowercase-name>, label=default, secret=<paste>
+      - Settings -> Add credential -> connector=<lowercase-name>, label=default, secret=<paste>
   - Promise to build the task as soon as the credential is registered
   - DO NOT call intent=create yet.
   - Prefer the structured intent=request_credential below over an inline plain-text instruction.
@@ -239,7 +247,7 @@ Recognised credentials and where to get them:
 Inside the workflow code, read the secret as process.env.PLATFORM_TOKEN_<CONNECTOR_UPPER> (dashes become underscores).
 
 STRONG RULES
-- Look at history. If the user just made a task and now says "그거 …로 바꿔", that's an UPDATE on the most-recent created task. Use its id, do not create a new one.
+- Look at history. If the user just made a task and now says "change it to …" (in any language), that's an UPDATE on the most-recent created task. Use its id, do not create a new one.
 - For "update", you MUST set "target_task_id" to one of the listed existing task ids.
 - For "create"/"update" that ship code, main.ts must default-export workflow.entrypoint(async (ctx) => { ... }).
 - Wrap external calls in ctx.checkpoint for idempotency in oneshot tasks. (Inside a service loop you can skip checkpoint because retries are explicit.)

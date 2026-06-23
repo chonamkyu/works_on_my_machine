@@ -1,11 +1,4 @@
-import {
-  Activity,
-  Brain,
-  Cog,
-  Compass,
-  GitBranch,
-  MessageSquare,
-} from "lucide-react";
+import { Activity, Cog, LayoutPanelLeft, MessageSquare } from "lucide-react";
 import { clsx } from "clsx";
 import type { View } from "../App";
 
@@ -13,9 +6,13 @@ interface Props {
   activityCount: number;
   view: View;
   onView: (v: View) => void;
+  hasSelectedTask: boolean;
 }
 
-export function TopBar({ activityCount, view, onView }: Props) {
+// memory / evolution / discover are now agent capabilities driven from chat.
+// They still have URL-accessible views (?view=memory etc.) for debugging
+// but are not in the primary nav anymore.
+export function TopBar({ activityCount, view, onView, hasSelectedTask }: Props) {
   return (
     <header className="h-12 border-b border-surface-700 bg-surface-800 flex items-center px-3 gap-2 text-text-secondary">
       <span className="font-mono text-xs tracking-wider uppercase text-text-muted">
@@ -23,9 +20,14 @@ export function TopBar({ activityCount, view, onView }: Props) {
       </span>
       <div className="flex-1" />
       <NavTab icon={<MessageSquare className="w-3.5 h-3.5" />} label="chat" active={view === "chat"} onClick={() => onView("chat")} />
-      <NavTab icon={<Brain className="w-3.5 h-3.5" />} label="memory" active={view === "memory"} onClick={() => onView("memory")} />
-      <NavTab icon={<GitBranch className="w-3.5 h-3.5" />} label="evolution" active={view === "evolution"} onClick={() => onView("evolution")} />
-      <NavTab icon={<Compass className="w-3.5 h-3.5" />} label="discover" active={view === "discover"} onClick={() => onView("discover")} />
+      {hasSelectedTask && (
+        <NavTab
+          icon={<LayoutPanelLeft className="w-3.5 h-3.5" />}
+          label="task"
+          active={view === "task"}
+          onClick={() => onView("task")}
+        />
+      )}
       <NavTab icon={<Cog className="w-3.5 h-3.5" />} label="settings" active={view === "settings"} onClick={() => onView("settings")} />
       <span className="flex items-center gap-1 text-[11px] text-text-muted px-2">
         <Activity className="w-3 h-3" />

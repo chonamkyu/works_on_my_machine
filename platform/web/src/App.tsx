@@ -11,30 +11,47 @@ import { SettingsView } from "./components/SettingsView";
 import { DiscoverView } from "./components/DiscoverView";
 
 const USER_ID = "u_local";
-export type View = "chat" | "memory" | "evolution" | "discover" | "settings";
+export type View = "chat" | "task" | "memory" | "evolution" | "discover" | "settings";
 
-function readTaskFromURL(): string | null {
+const VALID_VIEWS: View[] = ["chat", "memory", "evolution", "discover", "settings"];
+
+function readQuery(): { task: string | null; view: View } {
   const q = new URLSearchParams(window.location.search);
-  return q.get("task");
+  const v = q.get("view") as View | null;
+  return {
+    task: q.get("task"),
+    view: v && VALID_VIEWS.includes(v) ? v : "chat",
+  };
 }
-function writeTaskToURL(id: string | null) {
+function writeQuery(patch: { task?: string | null; view?: View }) {
   const url = new URL(window.location.href);
-  if (id) url.searchParams.set("task", id);
-  else url.searchParams.delete("task");
+  if (patch.task !== undefined) {
+    if (patch.task) url.searchParams.set("task", patch.task);
+    else url.searchParams.delete("task");
+  }
+  if (patch.view !== undefined) {
+    if (patch.view && patch.view !== "chat") url.searchParams.set("view", patch.view);
+    else url.searchParams.delete("view");
+  }
   window.history.replaceState({}, "", url.toString());
 }
 
 export function App() {
+  const initial = readQuery();
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [selectedTaskId, setSelectedTaskIdState] = useState<string | null>(readTaskFromURL());
+  const [selectedTaskId, setSelectedTaskIdState] = useState<string | null>(initial.task);
   const setSelectedTaskId = (id: string | null) => {
     setSelectedTaskIdState(id);
-    writeTaskToURL(id);
+    writeQuery({ task: id });
   };
   const [showDetail, setShowDetail] = useState(false);
   const [activityCount, setActivityCount] = useState(0);
   const [pulses, setPulses] = useState<Record<string, number>>({});
-  const [view, setView] = useState<View>("chat");
+  const [view, setViewState] = useState<View>(initial.view);
+  const setView = (v: View) => {
+    setViewState(v);
+    writeQuery({ view: v });
+  };
 
   const refresh = useCallback(async () => {
     const { tasks } = await api.listTasks();
@@ -90,7 +107,12 @@ export function App() {
 
   return (
     <div className="h-full flex flex-col bg-surface-900 text-text-primary">
-      <TopBar activityCount={activityCount} view={view} onView={setView} />
+      <TopBar
+        activityCount={activityCount}
+        view={view}
+        onView={setView}
+        hasSelectedTask={!!selectedTaskId}
+      />
       <div className="flex-1 flex min-h-0">
         <Sidebar
           tasks={tasks}
@@ -137,6 +159,14 @@ export function App() {
               />
             )}
           </>
+        )}
+        {view === "task" && selectedTask && (
+          <TaskDetail
+            task={selectedTask}
+            inline
+            onClose={() => setView("chat")}
+            onChanged={refresh}
+          />
         )}
         {view === "memory" && <MemoryView />}
         {view === "evolution" && <EvolutionView />}
