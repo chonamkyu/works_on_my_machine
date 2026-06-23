@@ -225,8 +225,18 @@ func (r *NodeRunner) childEnv(task *store.Task, run *store.Run) []string {
 	)
 	if r.creds != nil {
 		for _, conn := range task.Capabilities {
-			if _, secret, err := r.creds.ResolveDefault(task.UserID, conn); err == nil && secret != "" {
-				env = append(env, fmt.Sprintf("PLATFORM_TOKEN_%s=%s", strings.ToUpper(conn), secret))
+			_, val, primary, err := r.creds.ResolveDefaultFull(task.UserID, conn)
+			if err != nil {
+				continue
+			}
+			upper := strings.ToUpper(strings.ReplaceAll(conn, "-", "_"))
+			if primary != "" {
+				env = append(env, fmt.Sprintf("PLATFORM_TOKEN_%s=%s", upper, primary))
+			}
+			if len(val) > 0 {
+				if b, err := json.Marshal(val); err == nil {
+					env = append(env, fmt.Sprintf("PLATFORM_CREDENTIAL_%s=%s", upper, string(b)))
+				}
 			}
 		}
 	}

@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+// (strings imported above for path detection)
+
 // LlmgateEmbedder produces vector embeddings by calling llmgate's
 // OpenAI-compatible /api/v1/embeddings endpoint. The default model is
 // Amazon Titan v2 (1024 dim) — make sure pgvector column matches.
@@ -31,14 +33,19 @@ func NewLlmgateEmbedder(baseURL, apiKey, model string) *LlmgateEmbedder {
 
 func (e *LlmgateEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	if e.APIKey == "" {
-		return nil, fmt.Errorf("PLATFORM_LLMGATE_KEY unset")
+		return nil, fmt.Errorf("OPENAI_API_KEY (or PLATFORM_LLMGATE_KEY) unset")
 	}
 	body, _ := json.Marshal(map[string]any{
 		"model": e.Model,
 		"input": text,
 	})
+	// llmgate uses /api/v1/embeddings; vanilla OpenAI uses /v1/embeddings.
+	path := "/v1/embeddings"
+	if strings.Contains(e.BaseURL, "llmgate") || strings.Contains(e.BaseURL, "doosanrobotics") {
+		path = "/api/v1/embeddings"
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		e.BaseURL+"/api/v1/embeddings", bytes.NewReader(body))
+		e.BaseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

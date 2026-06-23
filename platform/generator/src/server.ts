@@ -81,6 +81,19 @@ Decide which of three intents this turn is and reply with ONE JSON object, no ma
     "reply": "<short message about what was removed>"
   }
 
+  Intent "manage_credential" — directly write or remove a credential in the user's vault. Use when the user says "그 키 이걸로 바꿔줘", "AWS 자격증명 등록해줘 {access_key_id, secret_access_key}", "openai 키 지워" etc.
+  {
+    "intent": "manage_credential",
+    "action": "upsert" | "delete",
+    "connector": "openai",
+    "label": "default",
+    "value": { "api_key": "sk-..." },     // for upsert: arbitrary JSON object
+    "reply": "<short message>"
+  }
+  - The value is stored as a JSON object. Single-secret services should use { "token": "..." } or { "api_key": "..." }.
+  - For "delete" set action="delete" and omit value.
+  - NEVER fabricate keys — only ship value when the user actually pasted it.
+
   Intent "request_credential" — you need a credential that is not yet registered. Stop and ask. Do NOT also ship code.
   {
     "intent": "request_credential",
@@ -234,7 +247,13 @@ STRONG RULES
 - Always respond in the same language as the user's latest message.`;
 
 interface GenResp {
-  intent: "create" | "update" | "chat" | "delete" | "request_credential";
+  intent:
+    | "create"
+    | "update"
+    | "chat"
+    | "delete"
+    | "request_credential"
+    | "manage_credential";
   target_task_id?: string;
   target_task_ids?: string[];
   name?: string;
@@ -244,10 +263,12 @@ interface GenResp {
   triggers?: Array<{ id: string; type: string; enabled: boolean; config?: Record<string, unknown> }>;
   workflow_yaml?: string;
   main_ts?: string;
-  // request_credential extras
+  // credential-related extras
   connector?: string;
   label?: string;
   credential_kind?: "token" | "oauth";
+  action?: "upsert" | "delete";
+  value?: Record<string, unknown>;
   help_url?: string;
   instructions?: string;
   follow_up_prompt?: string;
@@ -345,6 +366,18 @@ app.post<{ Body: GenerateBody }>("/generate", async (req, reply) => {
       help_url: out.help_url,
       instructions: out.instructions,
       follow_up_prompt: out.follow_up_prompt,
+      reply: out.reply,
+    });
+    reply.raw.end();
+    return;
+  }
+
+  if (out.intent === "manage_credential") {
+    send("workflow:manage_credential", {
+      action: out.action ?? "upsert",
+      connector: out.connector,
+      label: out.label ?? "default",
+      value: out.value ?? {},
       reply: out.reply,
     });
     reply.raw.end();

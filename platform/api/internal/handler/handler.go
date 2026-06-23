@@ -600,6 +600,41 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 		_, _ = h.Store.AppendMessage(sessionID, "assistant", reply, nil)
 		writeJSON(w, http.StatusOK, map[string]any{"sessionId": sessionID, "reply": reply})
 
+	case generator.IntentManageCredential:
+		if outcome.ManageCredential == nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "manage_credential without payload"})
+			return
+		}
+		mc := outcome.ManageCredential
+		switch mc.Action {
+		case "delete":
+			// Best-effort delete by connector+label match.
+			for _, c := range h.Credentials.List(store.DefaultUserID) {
+				if c.Connector == mc.Connector && (mc.Label == "" || c.Label == mc.Label) {
+					_ = h.Credentials.Delete(c.ID)
+				}
+			}
+		default: // upsert
+			_, err := h.Credentials.Upsert(&store.Credential{
+				UserID:    store.DefaultUserID,
+				Connector: mc.Connector,
+				Label:     mc.Label,
+				Value:     mc.Value,
+			})
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+		}
+		reply := outcome.Reply
+		if reply == "" {
+			reply = fmt.Sprintf("Credential %s for %s.", mc.Action, mc.Connector)
+		}
+		_, _ = h.Store.AppendMessage(sessionID, "assistant", reply, map[string]any{
+			"managedCredential": mc,
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"sessionId": sessionID, "reply": reply})
+
 	case generator.IntentRequestCredential:
 		reply := outcome.Reply
 		if reply == "" && outcome.CredentialRequest != nil {
@@ -818,10 +853,11 @@ func (h *Handler) ProposeEvolutionPR(w http.ResponseWriter, r *http.Request) {
 // --- credentials ------------------------------------------------------
 
 type createCredentialBody struct {
-	Connector string   `json:"connector"`
-	Label     string   `json:"label"`
-	Secret    string   `json:"secret"`
-	Scopes    []string `json:"scopes"`
+	Connector string         `json:"connector"`
+	Label     string         `json:"label"`
+	Secret    string         `json:"secret,omitempty"` // legacy single-string payload
+	Value     map[string]any `json:"value,omitempty"`  // new: arbitrary JSON
+	Scopes    []string       `json:"scopes"`
 }
 
 func (h *Handler) ListCredentials(w http.ResponseWriter, r *http.Request) {
@@ -834,8 +870,12 @@ func (h *Handler) CreateCredential(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	if body.Connector == "" || body.Label == "" || body.Secret == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "connector, label, secret required"})
+	if body.Connector == "" || body.Label == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "connector and label required"})
+		return
+	}
+	if body.Secret == "" && len(body.Value) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "either 'secret' or 'value' is required"})
 		return
 	}
 	c, err := h.Credentials.Upsert(&store.Credential{
@@ -843,6 +883,7 @@ func (h *Handler) CreateCredential(w http.ResponseWriter, r *http.Request) {
 		Connector: body.Connector,
 		Label:     body.Label,
 		Secret:    body.Secret,
+		Value:     body.Value,
 		Scopes:    body.Scopes,
 	})
 	if err != nil {

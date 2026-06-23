@@ -56,10 +56,11 @@ func main() {
 		log.Fatalf("credentials: %v", err)
 	}
 
-	// Bedrock Titan embeddings via llmgate. Optional — Search falls back to
-	// pg_trgm lexical only if the embedder is not configured.
-	if base := envOr("PLATFORM_LLMGATE_URL", ""); base != "" {
-		embedder := llm.NewLlmgateEmbedder(base, os.Getenv("PLATFORM_LLMGATE_KEY"), envOr("PLATFORM_EMBEDDING_MODEL", "qwen3-embedding-0.6b"))
+	// Provider-agnostic OpenAI-compatible embeddings. Honour both new
+	// (OPENAI_*) and legacy (PLATFORM_LLMGATE_*) env names.
+	if base := firstNonEmpty(envOr("OPENAI_BASE_URL", ""), envOr("PLATFORM_LLMGATE_URL", "")); base != "" {
+		key := firstNonEmpty(os.Getenv("OPENAI_API_KEY"), os.Getenv("PLATFORM_LLMGATE_KEY"))
+		embedder := llm.NewLlmgateEmbedder(base, key, envOr("PLATFORM_EMBEDDING_MODEL", "qwen3-embedding-0.6b"))
 		memStore.SetEmbedder(embedder)
 	}
 
@@ -186,4 +187,13 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

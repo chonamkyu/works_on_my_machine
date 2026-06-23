@@ -44,15 +44,24 @@ function env(name: string): string | undefined {
 }
 
 export function llmgateClient(opts: LlmgateClientOpts = {}) {
-  const baseUrl = (opts.baseUrl ?? env("PLATFORM_LLMGATE_URL") ?? "").replace(/\/$/, "");
-  const apiKey = opts.apiKey ?? env("PLATFORM_LLMGATE_KEY") ?? "";
+  // Provider-agnostic: any OpenAI-compatible base URL works (OpenAI, llmgate,
+  // Together, Groq, vLLM, …). Legacy PLATFORM_LLMGATE_* env vars are honored
+  // for back-compat.
+  const baseUrl = (
+    opts.baseUrl ??
+    env("OPENAI_BASE_URL") ??
+    env("PLATFORM_LLMGATE_URL") ??
+    "https://api.openai.com"
+  ).replace(/\/$/, "");
+  const apiKey =
+    opts.apiKey ?? env("OPENAI_API_KEY") ?? env("PLATFORM_LLMGATE_KEY") ?? "";
   const defaultModel =
     opts.defaultModel ?? env("PLATFORM_MODEL_RUN") ?? "anthropic.claude-haiku-4-5";
   const fetchImpl = opts.fetchImpl ?? fetch;
 
-  if (!baseUrl || !apiKey) {
+  if (!apiKey) {
     throw new Error(
-      "llmgateClient: PLATFORM_LLMGATE_URL and PLATFORM_LLMGATE_KEY must be set",
+      "openai client: set OPENAI_API_KEY (or PLATFORM_LLMGATE_KEY for back-compat)",
     );
   }
 
@@ -81,7 +90,13 @@ export function llmgateClient(opts: LlmgateClientOpts = {}) {
         ...(args.temperature !== undefined ? { temperature: args.temperature } : {}),
       };
 
-      const res = await fetchImpl(`${baseUrl}/api/v1/chat/completions`, {
+      // Some hosts use /v1/chat/completions, llmgate uses /api/v1/chat/completions.
+      // Try the OpenAI path first; if the URL already ends with /api/v1 keep it.
+      const path = baseUrl.endsWith("/v1") ? "/chat/completions"
+        : baseUrl.endsWith("/api/v1") ? "/chat/completions"
+        : baseUrl.includes("llmgate") || baseUrl.includes("doosanrobotics") ? "/api/v1/chat/completions"
+        : "/v1/chat/completions";
+      const res = await fetchImpl(`${baseUrl}${path}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

@@ -193,7 +193,13 @@ export const api = {
   proposeEvolution: (taskId: string) =>
     http<void>(`/v1/tasks/${taskId}/evolve`, { method: "POST" }),
   listCredentials: () => http<{ credentials: Credential[] | null }>("/v1/credentials"),
-  createCredential: (b: { connector: string; label: string; secret: string; scopes?: string[] }) =>
+  createCredential: (b: {
+    connector: string;
+    label: string;
+    secret?: string;
+    value?: Record<string, unknown>;
+    scopes?: string[];
+  }) =>
     http<Credential>("/v1/credentials", { method: "POST", body: JSON.stringify(b) }),
   deleteCredential: (id: string) =>
     http<void>(`/v1/credentials/${id}`, { method: "DELETE" }),

@@ -68,7 +68,17 @@ const (
 	IntentChat              Intent = "chat"
 	IntentDelete            Intent = "delete"
 	IntentRequestCredential Intent = "request_credential"
+	IntentManageCredential  Intent = "manage_credential"
 )
+
+// ManageCredential is the payload the agent issues when it wants to write or
+// remove a credential on the user's behalf.
+type ManageCredential struct {
+	Action    string         `json:"action"` // "upsert" or "delete"
+	Connector string         `json:"connector"`
+	Label     string         `json:"label"`
+	Value     map[string]any `json:"value"`
+}
 
 // CredentialRequest carries an agent-issued "I need a credential" tool call.
 type CredentialRequest struct {
@@ -97,6 +107,8 @@ type Outcome struct {
 
 	// For request_credential
 	CredentialRequest *CredentialRequest
+	// For manage_credential
+	ManageCredential *ManageCredential
 }
 
 type envelope struct {
@@ -210,6 +222,22 @@ func (c *Client) Generate(ctx context.Context, req Request) (*Outcome, error) {
 				CredentialRequest: &CredentialRequest{
 					Connector: p.Connector, Label: p.Label, Kind: p.Kind,
 					HelpURL: p.HelpURL, Instructions: p.Instructions, FollowUpPrompt: p.FollowUpPrompt,
+				},
+			}, nil
+		case "workflow:manage_credential":
+			var p struct {
+				Action    string         `json:"action"`
+				Connector string         `json:"connector"`
+				Label     string         `json:"label"`
+				Value     map[string]any `json:"value"`
+				Reply     string         `json:"reply"`
+			}
+			_ = json.Unmarshal(env.Payload, &p)
+			return &Outcome{
+				Intent: IntentManageCredential,
+				Reply:  p.Reply,
+				ManageCredential: &ManageCredential{
+					Action: p.Action, Connector: p.Connector, Label: p.Label, Value: p.Value,
 				},
 			}, nil
 		case "workflow:error":
