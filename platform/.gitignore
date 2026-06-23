@@ -1,0 +1,30 @@
+node_modules/
+dist/
+build/
+.next/
+*.log
+
+# Go
+bin/
+*.exe
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
+
+# Test artifacts
+test-results/
+playwright-report/
+coverage/
+.nyc_output/
+
+# Local platform state
+.platform/
+platform-data/

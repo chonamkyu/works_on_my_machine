@@ -1,0 +1,234 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgvector/pgvector-go"
+)
+
+type MemoryScope string
+
+const (
+	ScopeUser MemoryScope = "user"
+	ScopeTask MemoryScope = "task"
+)
+
+type MemoryEntry struct {
+	ID        string      `json:"id"`
+	UserID    string      `json:"userId"`
+	Scope     MemoryScope `json:"scope"`
+	ScopeKey  string      `json:"scopeKey"`
+	Topic     string      `json:"topic"`
+	Content   string      `json:"content"`
+	Embedding []float32   `json:"-"`
+	Pinned    bool        `json:"pinned"`
+	SourceRun string      `json:"sourceRunId,omitempty"`
+	CreatedAt time.Time   `json:"createdAt"`
+	UpdatedAt time.Time   `json:"updatedAt"`
+}
+
+// MemoryStore is the user/task scoped memory backed by pgvector.
+// Embeddings come from an external embedder (set with SetEmbedder). When
+// unset, Search falls back to keyword-only ranking using pg_trgm.
+type MemoryStore struct {
+	pool     *pgxpool.Pool
+	embedder Embedder
+}
+
+type Embedder interface {
+	Embed(ctx context.Context, text string) ([]float32, error)
+}
+
+func NewMemoryStore(pool *pgxpool.Pool) *MemoryStore {
+	return &MemoryStore{pool: pool}
+}
+
+func (m *MemoryStore) SetEmbedder(e Embedder) {
+	m.embedder = e
+}
+
+func (m *MemoryStore) Write(e *MemoryEntry) *MemoryEntry {
+	ctx := context.Background()
+	if e.ID == "" {
+		e.ID = "mem_" + randID()
+	}
+	now := time.Now()
+	if e.CreatedAt.IsZero() {
+		e.CreatedAt = now
+	}
+	e.UpdatedAt = now
+
+	if e.Embedding == nil && m.embedder != nil {
+		if v, err := m.embedder.Embed(ctx, e.Topic+" "+e.Content); err == nil {
+			e.Embedding = v
+		}
+	}
+
+	var embeddingArg any
+	if e.Embedding != nil {
+		v := pgvector.NewVector(e.Embedding)
+		embeddingArg = v
+	}
+
+	_, _ = m.pool.Exec(ctx, `
+		INSERT INTO memory_entries (id, user_id, scope, scope_key, topic, content, embedding, pinned, source_run_id, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		ON CONFLICT (id) DO UPDATE SET
+			topic=EXCLUDED.topic,
+			content=EXCLUDED.content,
+			embedding=EXCLUDED.embedding,
+			pinned=EXCLUDED.pinned,
+			updated_at=EXCLUDED.updated_at`,
+		e.ID, e.UserID, string(e.Scope), e.ScopeKey, e.Topic, e.Content,
+		embeddingArg, e.Pinned, nullableString(e.SourceRun), e.CreatedAt, e.UpdatedAt)
+	return e
+}
+
+func nullableString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func (m *MemoryStore) Delete(id string) bool {
+	tag, err := m.pool.Exec(context.Background(), `DELETE FROM memory_entries WHERE id=$1`, id)
+	if err != nil {
+		return false
+	}
+	return tag.RowsAffected() > 0
+}
+
+func (m *MemoryStore) Update(id string, mutate func(*MemoryEntry)) (*MemoryEntry, error) {
+	e, err := m.get(context.Background(), id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	mutate(e)
+	e.UpdatedAt = time.Now()
+	m.Write(e)
+	return e, nil
+}
+
+func (m *MemoryStore) get(ctx context.Context, id string) (*MemoryEntry, error) {
+	row := m.pool.QueryRow(ctx, `
+		SELECT id, user_id, scope, scope_key, topic, content, pinned, source_run_id, created_at, updated_at
+		FROM memory_entries WHERE id=$1`, id)
+	var e MemoryEntry
+	var scope string
+	var src *string
+	if err := row.Scan(&e.ID, &e.UserID, &scope, &e.ScopeKey, &e.Topic, &e.Content, &e.Pinned, &src, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		return nil, err
+	}
+	e.Scope = MemoryScope(scope)
+	if src != nil {
+		e.SourceRun = *src
+	}
+	return &e, nil
+}
+
+func (m *MemoryStore) List(userID string, scope MemoryScope, scopeKey string) []*MemoryEntry {
+	q := `SELECT id, user_id, scope, scope_key, topic, content, pinned, source_run_id, created_at, updated_at
+		FROM memory_entries WHERE user_id=$1`
+	args := []any{userID}
+	if scope != "" {
+		q += ` AND scope=$2`
+		args = append(args, string(scope))
+		if scope == ScopeTask && scopeKey != "" {
+			q += ` AND scope_key=$3`
+			args = append(args, scopeKey)
+		}
+	}
+	q += ` ORDER BY updated_at DESC LIMIT 500`
+	rows, err := m.pool.Query(context.Background(), q, args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []*MemoryEntry
+	for rows.Next() {
+		var e MemoryEntry
+		var sc string
+		var src *string
+		if err := rows.Scan(&e.ID, &e.UserID, &sc, &e.ScopeKey, &e.Topic, &e.Content, &e.Pinned, &src, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			continue
+		}
+		e.Scope = MemoryScope(sc)
+		if src != nil {
+			e.SourceRun = *src
+		}
+		out = append(out, &e)
+	}
+	return out
+}
+
+// Search runs a hybrid query: vector similarity (if embeddings available)
+// combined with pg_trgm content similarity. topK results return blended by
+// 0.6 vector + 0.4 lexical.
+func (m *MemoryStore) Search(userID, query string, topK int) []*MemoryEntry {
+	if topK <= 0 {
+		topK = 10
+	}
+	ctx := context.Background()
+
+	var queryVec *pgvector.Vector
+	if m.embedder != nil {
+		if v, err := m.embedder.Embed(ctx, query); err == nil {
+			vv := pgvector.NewVector(v)
+			queryVec = &vv
+		}
+	}
+
+	if queryVec != nil {
+		rows, err := m.pool.Query(ctx, `
+			SELECT id, user_id, scope, scope_key, topic, content, pinned, source_run_id, created_at, updated_at,
+			       (0.6 * (1 - (embedding <=> $1)) + 0.4 * similarity(content, $2)) AS rank
+			FROM memory_entries
+			WHERE user_id=$3 AND embedding IS NOT NULL
+			ORDER BY rank DESC
+			LIMIT $4`, queryVec, query, userID, topK)
+		if err == nil {
+			defer rows.Close()
+			return collectMemoryWithRank(rows)
+		}
+	}
+	// Lexical-only fallback.
+	rows, err := m.pool.Query(ctx, `
+		SELECT id, user_id, scope, scope_key, topic, content, pinned, source_run_id, created_at, updated_at,
+		       similarity(content, $1) AS rank
+		FROM memory_entries
+		WHERE user_id=$2 AND content % $1
+		ORDER BY rank DESC
+		LIMIT $3`, query, userID, topK)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	return collectMemoryWithRank(rows)
+}
+
+func collectMemoryWithRank(rows pgx.Rows) []*MemoryEntry {
+	var out []*MemoryEntry
+	for rows.Next() {
+		var e MemoryEntry
+		var sc string
+		var src *string
+		var rank float64
+		if err := rows.Scan(&e.ID, &e.UserID, &sc, &e.ScopeKey, &e.Topic, &e.Content, &e.Pinned, &src, &e.CreatedAt, &e.UpdatedAt, &rank); err != nil {
+			continue
+		}
+		e.Scope = MemoryScope(sc)
+		if src != nil {
+			e.SourceRun = *src
+		}
+		out = append(out, &e)
+	}
+	return out
+}

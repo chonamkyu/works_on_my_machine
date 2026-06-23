@@ -1,0 +1,20 @@
+{
+  "name": "@platform/mcp-server",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Platform MCP server — exposes the control plane to agent-driven testing clients.",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
