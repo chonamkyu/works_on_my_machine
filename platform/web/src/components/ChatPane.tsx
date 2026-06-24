@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Sparkles, KeyRound } from "lucide-react";
+import { Sparkles, KeyRound, ExternalLink } from "lucide-react";
 import { api } from "../lib/api";
 
 interface CredentialRequest {
@@ -21,11 +21,15 @@ interface Message {
 export function ChatPane({
   sessionId,
   taskName,
+  taskId,
+  taskKind,
   onOpenDetail,
   onTaskCreated,
 }: {
   sessionId: string;
   taskName?: string;
+  taskId?: string;
+  taskKind?: string;
   onOpenDetail?: () => void;
   onTaskCreated: (newId?: string) => Promise<void>;
 }) {
@@ -113,6 +117,17 @@ export function ChatPane({
         <span className="font-mono text-xs">{taskName ?? "task"}</span>
         <span className="font-mono text-[10px] text-text-dim">{sessionId}</span>
         <div className="flex-1" />
+        {taskKind === "service" && taskId && (
+          <a
+            href={`/d/${taskId}/`}
+            target="_blank"
+            rel="noreferrer"
+            className="h-7 px-2 rounded border border-brand-600 hover:bg-brand-600/10 text-xs font-mono text-brand-600 flex items-center gap-1"
+            data-testid="chat-open-dashboard"
+          >
+            dashboard <ExternalLink className="w-3 h-3" />
+          </a>
+        )}
         {onOpenDetail && (
           <button
             onClick={onOpenDetail}

@@ -710,6 +710,9 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 			if err := h.Files.WriteFiles(taskID, outcome.Files); err != nil {
 				log.Printf("update write failed: %v", err)
 			}
+			if task.Kind == "service" && h.Services != nil {
+				h.Services.Restart(taskID)
+			}
 		}
 		h.Bus.Publish(store.Event{
 			Channel: "task:updated:" + store.DefaultUserID,
@@ -828,6 +831,11 @@ func (h *Handler) AcceptEvolutionPR(w http.ResponseWriter, r *http.Request) {
 	if err := h.Engine.ApplyAccepted(pr); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
+	}
+	if h.Services != nil {
+		if t, err := h.Store.GetTask(pr.TaskID); err == nil && t.Kind == "service" {
+			h.Services.Restart(pr.TaskID)
+		}
 	}
 	pr, _ = h.Evolution.Resolve(id, store.EvolutionAccepted)
 	writeJSON(w, http.StatusOK, pr)

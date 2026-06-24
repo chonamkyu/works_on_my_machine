@@ -131,6 +131,8 @@ export function App() {
               <ChatPane
                 sessionId={sessionId}
                 taskName={selectedTask?.name ?? "task"}
+                taskId={selectedTask?.id}
+                taskKind={selectedTask?.kind}
                 onOpenDetail={() => selectedTask && setShowDetail(true)}
                 onTaskCreated={async (newId) => {
                   await refresh();
