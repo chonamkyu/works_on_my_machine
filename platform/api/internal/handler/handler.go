@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 
 	"github.com/nk/platform/api/internal/generator"
 	"github.com/nk/platform/api/internal/oauth"
+	"github.com/nk/platform/api/internal/portreg"
 	"github.com/nk/platform/api/internal/runner"
 	"github.com/nk/platform/api/internal/store"
 )
@@ -36,6 +39,7 @@ type Handler struct {
 	Credentials *store.CredentialStore
 	OAuth       *oauth.Manager
 	Services    *runner.ServiceManager
+	Ports       *portreg.Registry
 }
 
 func New(
@@ -1044,35 +1048,74 @@ func (h *Handler) ForkTask(w http.ResponseWriter, r *http.Request) {
 
 // --- dashboards -------------------------------------------------------
 
-// ServeDashboard maps /d/<task_id>/<rest> to the dashboard build output for
-// that task. Phase 1: serves a built static bundle from
-// $PLATFORM_WORKFLOW_ROOT/<task_id>/dashboard/dist.
+// ServeDashboard reverse-proxies /d/<task_id>/<rest> to the workflow's own
+// HTTP server (running as a kind=service daemon on a loopback port the
+// platform allocated at spawn time). WebSockets and SSE pass through.
+//
+// If the task has no live port mapping yet (e.g. service still booting),
+// we briefly retry — the workflow usually binds within a second of spawn.
 func (h *Handler) ServeDashboard(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskId")
-	rest := chi.URLParam(r, "*")
-	if rest == "" {
-		rest = "index.html"
-	}
-	base := h.Files.Dir(taskID)
-	dashDir := filepath.Join(base, "dashboard", "dist")
-	full := filepath.Join(dashDir, rest)
 
-	// Refuse path escapes.
-	rel, err := filepath.Rel(dashDir, full)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		http.Error(w, "bad path", http.StatusBadRequest)
+	port, ok := h.Ports.Lookup(taskID)
+	if !ok {
+		http.Error(w, "no dashboard running for this task. Make it a service workflow that listens on process.env.PLATFORM_PORT.", http.StatusNotFound)
 		return
 	}
 
-	if info, err := os.Stat(full); err != nil || info.IsDir() {
-		// Fallback to index.html for SPA-style routing.
-		full = filepath.Join(dashDir, "index.html")
-		if _, err := os.Stat(full); err != nil {
-			http.Error(w, "no dashboard for this task", http.StatusNotFound)
-			return
-		}
+	target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
+	proxy := &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			req.URL.Scheme = target.Scheme
+			req.URL.Host = target.Host
+			req.Host = target.Host
+			// Strip the /d/<task_id> prefix so the workflow sees a clean path.
+			prefix := "/d/" + taskID
+			req.URL.Path = strings.TrimPrefix(req.URL.Path, prefix)
+			if req.URL.Path == "" {
+				req.URL.Path = "/"
+			}
+			// Surface the public base path so the workflow can build absolute
+			// URLs that route back through the proxy.
+			req.Header.Set("X-Forwarded-Prefix", prefix)
+			req.Header.Set("X-Forwarded-Proto", "http")
+			if _, hasUA := req.Header["User-Agent"]; !hasUA {
+				req.Header.Set("User-Agent", "")
+			}
+		},
+		// Retry once if the listener isn't up yet — service workflows take a
+		// beat to bind after spawn.
+		Transport: &retryTransport{base: http.DefaultTransport, attempts: 3, gap: 400 * time.Millisecond},
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			log.Printf("dashboard proxy error for %s: %v", taskID, err)
+			http.Error(w, "dashboard upstream unreachable: "+err.Error(), http.StatusBadGateway)
+		},
 	}
-	http.ServeFile(w, r, full)
+	proxy.ServeHTTP(w, r)
+}
+
+type retryTransport struct {
+	base     http.RoundTripper
+	attempts int
+	gap      time.Duration
+}
+
+func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var lastErr error
+	for i := 0; i < t.attempts; i++ {
+		resp, err := t.base.RoundTrip(req)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		var ne net.Error
+		if errors.As(err, &ne) || strings.Contains(err.Error(), "connection refused") {
+			time.Sleep(t.gap)
+			continue
+		}
+		break
+	}
+	return nil, lastErr
 }
 
 // --- helpers ----------------------------------------------------------

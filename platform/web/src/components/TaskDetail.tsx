@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Play, Square, X, GitBranch, Trash2 } from "lucide-react";
+import { Play, Square, X, GitBranch, Trash2, ExternalLink } from "lucide-react";
 import { clsx } from "clsx";
 import { api, subscribe } from "../lib/api";
 import type { Task, Run, LogLine, SSEMessage, Model } from "../lib/api";
@@ -136,6 +136,17 @@ export function TaskDetail({ task, onClose, onChanged, inline }: Props) {
           >
             <GitBranch className="w-3 h-3" /> {evolving ? "asking…" : "Evolve"}
           </button>
+          {task.kind === "service" && (
+            <a
+              href={`/d/${task.id}/`}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1 h-7 px-3 rounded bg-surface-700 text-text-secondary text-xs hover:text-text-primary"
+              data-testid="task-open-dashboard"
+            >
+              <ExternalLink className="w-3 h-3" /> Dashboard
+            </a>
+          )}
           <span className="font-mono text-[11px] text-text-muted ml-2">
             {activeRun ? `run · ${activeRun.state}` : "idle"}
           </span>

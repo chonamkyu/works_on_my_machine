@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nk/platform/api/internal/portreg"
 	"github.com/nk/platform/api/internal/store"
 )
 
@@ -21,6 +22,7 @@ type ServiceManager struct {
 	node  *NodeRunner
 	bus   *store.Bus
 	hook  PostRunHook // self-healing: reflection runs after every crash
+	ports *portreg.Registry
 
 	mu         sync.Mutex
 	running    map[string]*serviceProc
@@ -34,12 +36,13 @@ type serviceProc struct {
 	taskID string
 }
 
-func NewServiceManager(s *store.Memory, n *NodeRunner, b *store.Bus, hook PostRunHook) *ServiceManager {
+func NewServiceManager(s *store.Memory, n *NodeRunner, b *store.Bus, hook PostRunHook, ports *portreg.Registry) *ServiceManager {
 	return &ServiceManager{
 		store:   s,
 		node:    n,
 		bus:     b,
 		hook:    hook,
+		ports:   ports,
 		running: map[string]*serviceProc{},
 		stopCh:  make(chan struct{}),
 	}
@@ -54,8 +57,11 @@ func (sm *ServiceManager) Stop() {
 	sm.stopOnce.Do(func() { close(sm.stopCh) })
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	for _, p := range sm.running {
+	for id, p := range sm.running {
 		p.cancel()
+		if sm.ports != nil {
+			sm.ports.Release(id)
+		}
 	}
 	sm.running = map[string]*serviceProc{}
 }
@@ -99,6 +105,9 @@ func (sm *ServiceManager) reconcile() {
 			log.Printf("service: stopping %s (task removed)", id)
 			p.cancel()
 			delete(sm.running, id)
+			if sm.ports != nil {
+				sm.ports.Release(id)
+			}
 		}
 	}
 	// Start new ones.

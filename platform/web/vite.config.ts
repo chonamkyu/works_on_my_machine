@@ -12,6 +12,12 @@ export default defineConfig({
         target: process.env.PLATFORM_API ?? "http://localhost:8787",
         changeOrigin: true,
       },
+      "/d": {
+        target: process.env.PLATFORM_API ?? "http://localhost:8787",
+        changeOrigin: true,
+        ws: true,
+      },
+      "/oauth": process.env.PLATFORM_API ?? "http://localhost:8787",
       "/healthz": process.env.PLATFORM_API ?? "http://localhost:8787",
     },
   },

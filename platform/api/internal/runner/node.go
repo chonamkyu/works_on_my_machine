@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nk/platform/api/internal/portreg"
 	"github.com/nk/platform/api/internal/store"
 )
 
@@ -34,12 +35,13 @@ type NodeRunner struct {
 	node    string
 	hook    PostRunHook
 	creds   *store.CredentialStore
+	ports   *portreg.Registry
 
 	mu     sync.Mutex
 	cancel map[string]context.CancelFunc
 }
 
-func NewNode(s *store.Memory, b *store.Bus, files *store.WorkflowFS, sdkPath string, hook PostRunHook, creds *store.CredentialStore) *NodeRunner {
+func NewNode(s *store.Memory, b *store.Bus, files *store.WorkflowFS, sdkPath string, hook PostRunHook, creds *store.CredentialStore, ports *portreg.Registry) *NodeRunner {
 	return &NodeRunner{
 		store:   s,
 		bus:     b,
@@ -48,6 +50,7 @@ func NewNode(s *store.Memory, b *store.Bus, files *store.WorkflowFS, sdkPath str
 		node:    nodeBinary(),
 		hook:    hook,
 		creds:   creds,
+		ports:   ports,
 		cancel:  map[string]context.CancelFunc{},
 	}
 }
@@ -223,6 +226,13 @@ func (r *NodeRunner) childEnv(task *store.Task, run *store.Run) []string {
 		"PLATFORM_TASK_ID="+task.ID,
 		"PLATFORM_USER_ID="+task.UserID,
 	)
+	// Service workflows get a stable loopback port for their dashboard
+	// HTTP server. The control plane reverse-proxies /d/<task>/* to it.
+	if r.ports != nil && task.Kind == "service" {
+		if port, err := r.ports.Allocate(task.ID); err == nil {
+			env = append(env, fmt.Sprintf("PLATFORM_PORT=%d", port))
+		}
+	}
 	if r.creds != nil {
 		for _, conn := range task.Capabilities {
 			_, val, primary, err := r.creds.ResolveDefaultFull(task.UserID, conn)

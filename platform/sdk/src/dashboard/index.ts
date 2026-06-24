@@ -1,10 +1,20 @@
 /**
- * React hooks that workflow dashboards use to access platform data.
+ * Dashboard surface for workflow authors.
  *
- * Phase 0 ships type stubs; Phase 2 wires up the federated remote runtime.
+ * - `dashboard.serve(handler)`   — spin an HTTP server on PLATFORM_PORT
+ * - `dashboard.serveHtml(html)`  — one-page convenience
+ * - `dashboard.route([...])`     — method+path routing
+ *
+ * The control plane reverse-proxies `/d/<task_id>/*` to the workflow's
+ * loopback port for any `kind: service` workflow that was given one.
+ *
+ * The React hooks below are stubs; they'll get a real wiring when the
+ * dashboard runtime gains a fetch helper.
  */
 
-import type { MemoryEntry } from "../index.ts";
+export { dashboard } from "./server.js";
+
+import type { MemoryEntry } from "../index.js";
 
 export interface WorkflowKvHook<T> {
   data: T | null;

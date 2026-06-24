@@ -17,6 +17,7 @@ import (
 	"github.com/nk/platform/api/internal/handler"
 	"github.com/nk/platform/api/internal/llm"
 	"github.com/nk/platform/api/internal/oauth"
+	"github.com/nk/platform/api/internal/portreg"
 	"github.com/nk/platform/api/internal/reflection"
 	"github.com/nk/platform/api/internal/runner"
 	"github.com/nk/platform/api/internal/scheduler"
@@ -69,7 +70,8 @@ func main() {
 	hook := runner.ReflectionHook(reflectClient, memStore, bus, taskStore, evoEngine)
 
 	mockRunner := runner.NewMock(taskStore, bus)
-	nodeRunner := runner.NewNode(taskStore, bus, files, sdkPath, hook, credStore)
+	ports := portreg.New()
+	nodeRunner := runner.NewNode(taskStore, bus, files, sdkPath, hook, credStore, ports)
 	dispatch := runner.NewDispatcher(files, nodeRunner, mockRunner)
 
 	gen := generator.New(envOr("PLATFORM_GENERATOR_URL", "http://localhost:8081"))
@@ -77,6 +79,7 @@ func main() {
 	oauthMgr := oauth.NewManager(credStore, envOr("PLATFORM_PUBLIC_URL", "http://localhost:8787"))
 
 	h := handler.New(taskStore, bus, dispatch, files, gen, memStore, evoStore, evoEngine, credStore, oauthMgr)
+	h.Ports = ports
 
 	sched := scheduler.NewCron(taskStore, dispatch)
 	sched.Start()
@@ -87,7 +90,7 @@ func main() {
 	// Long-running service workflows (kind=service) — daemon supervisor.
 	// The reflection hook feeds every crash back through Reflection +
 	// Evolution so the service heals itself over time.
-	svc := runner.NewServiceManager(taskStore, nodeRunner, bus, hook)
+	svc := runner.NewServiceManager(taskStore, nodeRunner, bus, hook, ports)
 	svc.Start()
 	defer svc.Stop()
 	h.Services = svc
