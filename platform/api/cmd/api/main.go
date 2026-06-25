@@ -281,7 +281,9 @@ func main() {
 		r.Post("/tasks/{id}/fork", h.ForkTask)
 	})
 
-	r.Get("/d/{taskId}/*", h.ServeDashboard)
+	// All HTTP methods need to reverse-proxy through to the workflow — the
+	// dashboard might serve POST /api/* JSON endpoints, PUT uploads, etc.
+	r.HandleFunc("/d/{taskId}/*", h.ServeDashboard)
 
 	addr := envOr("PLATFORM_API_ADDR", ":8787")
 	log.Printf("api listening on %s", addr)
