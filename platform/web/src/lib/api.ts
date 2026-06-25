@@ -142,8 +142,10 @@ export const api = {
   createTask: (b: { name: string; description?: string; triggers?: Trigger[]; capabilities?: string[] }) =>
     http<Task>("/v1/tasks", { method: "POST", body: JSON.stringify(b) }),
   getTask: (id: string) => http<Task>(`/v1/tasks/${id}`),
+  /** Returns the full source tree (path -> contents) of a task. Excludes
+   *  runtime cruft (node_modules, dist, launcher, lockfiles). */
   getTaskCode: (id: string) =>
-    http<{ "workflow.yaml": string; "main.ts": string }>(`/v1/tasks/${id}/code`),
+    http<Record<string, string>>(`/v1/tasks/${id}/code`),
   triggerRun: (id: string) =>
     http<Run>(`/v1/tasks/${id}/runs`, {
       method: "POST",
@@ -190,6 +192,8 @@ export const api = {
     http<EvolutionPR>(`/v1/evolution/${id}/accept`, { method: "POST" }),
   rejectEvolutionPR: (id: string) =>
     http<EvolutionPR>(`/v1/evolution/${id}/reject`, { method: "POST" }),
+  /** Evolution is automated (failure streak / reflection hints / nightly
+   *  SkillEvolver). This is admin-only — left for curl / tests. */
   proposeEvolution: (taskId: string) =>
     http<void>(`/v1/tasks/${taskId}/evolve`, { method: "POST" }),
   listCredentials: () => http<{ credentials: Credential[] | null }>("/v1/credentials"),
@@ -226,6 +230,13 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ model }),
     }),
+  renameTask: (taskId: string, name: string) =>
+    http<Task>(`/v1/tasks/${taskId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    }),
+  listTaskPorts: (taskId: string) =>
+    http<{ ports: { TaskID: string; Name: string; Role: string; Port: number }[] }>(`/v1/tasks/${taskId}/ports`),
 };
 
 export interface SSEMessage {

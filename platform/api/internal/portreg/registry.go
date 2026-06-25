@@ -1,7 +1,11 @@
 // Package portreg keeps the TaskID <-> localhost-port mapping used by the
-// dashboard reverse-proxy. Each `kind=service` workflow gets a unique loopback
-// port at spawn time, listens on it, and the control plane forwards
-// `/d/<task_id>/*` requests to that port.
+// dashboard reverse-proxy.
+//
+// Each `kind=service` workflow can expose multiple named HTTP surfaces (UI,
+// API, websocket, …). The registry allocates one free loopback port per
+// declared TaskPort and the control plane reverse-proxies
+// `/d/<task_id>/<name>/*` to each. The "ui" role is also reachable bare at
+// `/d/<task_id>/` so the iframe default URL stays clean.
 package portreg
 
 import (
@@ -9,88 +13,130 @@ import (
 	"sync"
 )
 
-type entry struct {
-	Port    int
-	TaskID  string
-	Pinned  bool // future use — pre-allocated stable ports
+// Binding is one allocated port for a (task, name) pair.
+type Binding struct {
+	TaskID string
+	Name   string // e.g. "ui", "api", "ws". Default name is "ui".
+	Role   string // "ui" | "api" | "other"
+	Port   int
 }
 
 // Registry is thread-safe. The zero value is NOT usable; call New().
 type Registry struct {
-	mu    sync.RWMutex
-	byID  map[string]*entry
-	byPort map[int]string
+	mu sync.RWMutex
+	// byTask: taskID -> ( name -> *Binding )
+	byTask map[string]map[string]*Binding
 }
 
 func New() *Registry {
-	return &Registry{
-		byID:   map[string]*entry{},
-		byPort: map[int]string{},
-	}
+	return &Registry{byTask: map[string]map[string]*Binding{}}
 }
 
-// Allocate reserves a free loopback port for the given task and remembers it.
-// If a port was already allocated for this task (e.g. supervisor restart) we
-// keep the same port so the dashboard URL stays stable.
-func (r *Registry) Allocate(taskID string) (int, error) {
+// AllocateNamed reserves a free loopback port for the given (task, name).
+// Idempotent: if the same name was already allocated for this task and the
+// port is still free, we hand back the existing one so dashboard URLs are
+// stable across supervisor restarts.
+func (r *Registry) AllocateNamed(taskID, name, role string) (int, error) {
+	if name == "" {
+		name = "ui"
+	}
 	r.mu.Lock()
-	if e, ok := r.byID[taskID]; ok {
-		r.mu.Unlock()
-		// Make sure the port is still free (a previous child holding it should
-		// have died); if not, fall through to a fresh allocation.
-		if isPortFree(e.Port) {
-			return e.Port, nil
+	bag := r.byTask[taskID]
+	if bag != nil {
+		if b, ok := bag[name]; ok && isPortFree(b.Port) {
+			r.mu.Unlock()
+			return b.Port, nil
 		}
-		r.mu.Lock()
 	}
 	port, err := pickFreePort()
 	if err != nil {
 		r.mu.Unlock()
 		return 0, err
 	}
-	r.byID[taskID] = &entry{Port: port, TaskID: taskID}
-	r.byPort[port] = taskID
+	if bag == nil {
+		bag = map[string]*Binding{}
+		r.byTask[taskID] = bag
+	}
+	bag[name] = &Binding{TaskID: taskID, Name: name, Role: role, Port: port}
 	r.mu.Unlock()
 	return port, nil
 }
 
-// Lookup returns the port previously allocated for taskID, if any.
+// Allocate is the single-port back-compat wrapper. Equivalent to allocating
+// a binding named "ui" with role "ui".
+func (r *Registry) Allocate(taskID string) (int, error) {
+	return r.AllocateNamed(taskID, "ui", "ui")
+}
+
+// Lookup returns the port of the "ui" binding for the task (back-compat).
 func (r *Registry) Lookup(taskID string) (int, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	e, ok := r.byID[taskID]
-	if !ok {
-		return 0, false
+	if bag, ok := r.byTask[taskID]; ok {
+		if b, ok := bag["ui"]; ok {
+			return b.Port, true
+		}
+		// No "ui" binding — fall back to whatever has role="ui" or the first
+		// binding so /d/<task>/ stays useful even if names diverge.
+		for _, b := range bag {
+			if b.Role == "ui" {
+				return b.Port, true
+			}
+		}
+		for _, b := range bag {
+			return b.Port, true
+		}
 	}
-	return e.Port, true
+	return 0, false
 }
 
-// Release frees the port association for taskID. The child holding the port
-// should be dead first (otherwise the port stays bound at the OS layer).
-func (r *Registry) Release(taskID string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if e, ok := r.byID[taskID]; ok {
-		delete(r.byPort, e.Port)
-		delete(r.byID, taskID)
-	}
-}
-
-// All returns a snapshot of all current bindings — used by debug endpoints.
-func (r *Registry) All() map[string]int {
+// LookupNamed returns the port for a specific binding name on a task.
+func (r *Registry) LookupNamed(taskID, name string) (*Binding, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make(map[string]int, len(r.byID))
-	for id, e := range r.byID {
-		out[id] = e.Port
+	if bag, ok := r.byTask[taskID]; ok {
+		if b, ok := bag[name]; ok {
+			return b, true
+		}
+	}
+	return nil, false
+}
+
+// ListForTask returns all bindings for a task — used by the panel's port-map
+// view and the runner when injecting `PLATFORM_PORT_<NAME>` env vars.
+func (r *Registry) ListForTask(taskID string) []Binding {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := []Binding{}
+	if bag, ok := r.byTask[taskID]; ok {
+		for _, b := range bag {
+			out = append(out, *b)
+		}
 	}
 	return out
 }
 
-// pickFreePort asks the kernel for an unused loopback port via Listen(":0").
-// Releasing immediately is racey (another process could snatch it before the
-// workflow binds), but in practice the workflow child is the only thing
-// rushing to claim it and binding usually wins.
+// Release frees every binding for a task. Called when the supervisor stops
+// the daemon or the task is archived.
+func (r *Registry) Release(taskID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.byTask, taskID)
+}
+
+// All returns a snapshot of all bindings — admin endpoints only.
+func (r *Registry) All() []Binding {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := []Binding{}
+	for _, bag := range r.byTask {
+		for _, b := range bag {
+			out = append(out, *b)
+		}
+	}
+	return out
+}
+
 func pickFreePort() (int, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

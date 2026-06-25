@@ -1,4 +1,30 @@
+---
+activate_when: tag:dashboard
+---
+
 # Dashboard visual design
+
+## Reference library
+
+For richer design language inspiration there's a curated catalog of brand
+DESIGN.md files at <https://github.com/voltagent/awesome-design-md>. When the
+user mentions a specific brand or product whose look they want to emulate
+("make it feel like Linear", "Stripe-style table", "newspaper like the
+Verge"), you can recall the design tokens from that catalog if you know
+them, OR ask the user to paste the relevant DESIGN.md snippet inline so the
+HTML you generate honors the right palette/type/scale exactly.
+
+Brands available in the catalog (use as inspiration, not as templates):
+linear.app · raycast · claude · cursor · vercel · stripe · resend ·
+notion · figma · framer · superhuman · cal · sentry · supabase · warp ·
+opencode.ai · mintlify · posthog · airbnb · apple · spotify · the-verge ·
+wired · binance · coinbase · revolut · nike · tesla · spacex · nintendo-2001
+(see the repo for the full 73-brand list).
+
+When the brief doesn't pin a brand, design from the data the dashboard
+shows — DON'T default to one of those references just because they're
+available. The point of the library is to give you precise tokens when
+the user has a specific aesthetic in mind, not to template every page.
 
 When generating a `kind: service` workflow that serves a dashboard, treat the
 HTML/CSS the same way a hired design lead would — every dashboard should have a

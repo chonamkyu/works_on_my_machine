@@ -134,6 +134,108 @@ export function llmgateClient(opts: LlmgateClientOpts = {}) {
         );
       }
     },
+
+    /**
+     * Stream the model's response one chunk at a time. The caller's `onDelta`
+     * fires per OpenAI-style content delta; the promise resolves with the full
+     * accumulated text once the upstream emits `data: [DONE]`.
+     */
+    async completeStream(
+      args: CompleteArgs,
+      onDelta: (chunk: string) => void,
+    ): Promise<CompleteResult> {
+      const messages: ChatMessage[] =
+        args.messages ??
+        (args.prompt ? [{ role: "user", content: args.prompt }] : []);
+      if (messages.length === 0) {
+        throw new Error("completeStream: prompt or messages required");
+      }
+      const finalMessages = [...messages];
+      if (args.responseFormat === "json") {
+        const last = finalMessages[finalMessages.length - 1];
+        if (last && last.role === "user") {
+          last.content +=
+            "\n\nReply with raw JSON only. No prose, no code fences.";
+        }
+      }
+      const body = {
+        model: args.model ?? defaultModel,
+        messages: finalMessages,
+        max_tokens: args.maxTokens ?? 1024,
+        stream: true,
+        ...(args.temperature !== undefined ? { temperature: args.temperature } : {}),
+      };
+      const path = baseUrl.endsWith("/v1") ? "/chat/completions"
+        : baseUrl.endsWith("/api/v1") ? "/chat/completions"
+        : baseUrl.includes("llmgate") || baseUrl.includes("doosanrobotics") ? "/api/v1/chat/completions"
+        : "/v1/chat/completions";
+      const res = await fetchImpl(`${baseUrl}${path}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok || !res.body) {
+        const text = res.body ? await res.text() : "";
+        throw new Error(`llmgate ${res.status}: ${text.slice(0, 500)}`);
+      }
+      const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let acc = "";
+      let model = body.model;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        // SSE frames are separated by blank lines. Process whole frames only;
+        // keep the trailing partial frame in `buf` until more bytes arrive.
+        let idx;
+        while ((idx = buf.indexOf("\n\n")) !== -1) {
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          for (const line of frame.split("\n")) {
+            if (!line.startsWith("data:")) continue;
+            const payload = line.slice(5).trim();
+            if (!payload || payload === "[DONE]") continue;
+            try {
+              const ev = JSON.parse(payload) as {
+                model?: string;
+                choices?: { delta?: { content?: string } }[];
+              };
+              if (ev.model) model = ev.model;
+              const d = ev.choices?.[0]?.delta?.content;
+              if (d) {
+                acc += d;
+                onDelta(d);
+              }
+            } catch {
+              // skip non-JSON keep-alive lines
+            }
+          }
+        }
+      }
+      return { text: acc, model, promptTokens: 0, completionTokens: 0 };
+    },
+
+    /** Streaming variant of completeJSON. Emits raw deltas through `onDelta`
+     *  and parses the final accumulated text as JSON. */
+    async completeJSONStream<T>(
+      args: CompleteArgs,
+      onDelta: (chunk: string) => void,
+    ): Promise<T> {
+      const r = await this.completeStream({ ...args, responseFormat: "json" }, onDelta);
+      const trimmed = stripCodeFence(r.text);
+      try {
+        return JSON.parse(trimmed) as T;
+      } catch (err) {
+        throw new Error(
+          `llmgate JSON parse failed: ${(err as Error).message} -- text: ${trimmed.slice(0, 200)}`,
+        );
+      }
+    },
   };
 }
 

@@ -1,44 +1,81 @@
 @import "tailwindcss";
 
+/* Linear-base palette. Near-black canvas (#010102), surface tiers, hairline
+   borders, single lavender accent. Old surface-* / brand-* / accent-* / text-*
+   tokens are mapped onto the new ones so existing components keep working
+   while we migrate the layout. */
 @theme {
-  --color-surface-700: #3f3f46;
-  --color-surface-800: #2c2c30;
-  --color-surface-850: #262629;
-  --color-surface-900: #1c1c1f;
-  --color-surface-950: #141416;
+  /* Canvas + surfaces */
+  --color-canvas: #010102;
+  --color-surface-1: #0f1011;
+  --color-surface-2: #141516;
+  --color-surface-3: #18191a;
+  --color-surface-4: #1c1d1e;
 
-  --color-text-primary: #e4e4e7;
-  --color-text-secondary: #a1a1aa;
-  --color-text-muted: #71717a;
-  --color-text-dim: #52525b;
-  --color-text-bright: #fafafa;
+  /* Hairlines */
+  --color-hairline: #23252a;
+  --color-hairline-strong: #34343a;
+  --color-hairline-tertiary: #3e3e44;
 
-  --color-brand-400: #fbbf24;
-  --color-brand-500: #f59e0b;
-  --color-brand-600: #d97706;
-  --color-brand-700: #b45309;
+  /* Ink */
+  --color-ink: #f7f8f8;
+  --color-ink-muted: #d0d6e0;
+  --color-ink-subtle: #8a8f98;
+  --color-ink-tertiary: #62666d;
 
-  --color-accent-600: #0d9488;
+  /* Brand accent (Linear lavender) — used SPARINGLY: focus ring, active task,
+     primary CTA. Never decoratively. */
+  --color-accent: #5e6ad2;
+  --color-accent-hover: #828fff;
+  --color-accent-pressed: #5e69d1;
+  --color-accent-soft: #5e6ad2cc;
 
-  --color-status-running: #22c55e;
-  --color-status-waiting: #fbbf24;
-  --color-status-idle: #71717a;
-  --color-status-failed: #ef4444;
-  --color-status-starting: #f59e0b;
-  --color-status-stopped: #52525b;
+  /* Status — desaturated against the dark canvas so the brand still wins.   */
+  --color-status-running: #27a644;
+  --color-status-waiting: #b89968;
+  --color-status-idle: #62666d;
+  --color-status-failed: #d36b5f;
+  --color-status-starting: #b89968;
+  --color-status-stopped: #3e3e44;
 
-  --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "Geist Mono", ui-monospace, monospace;
+  /* Legacy aliases — existing components reference these. Map them onto the
+     new tokens so the migration is incremental. */
+  --color-surface-700: var(--color-hairline);
+  --color-surface-800: var(--color-surface-2);
+  --color-surface-850: var(--color-surface-3);
+  --color-surface-900: var(--color-surface-1);
+  --color-surface-950: var(--color-canvas);
+  --color-text-primary: var(--color-ink);
+  --color-text-secondary: var(--color-ink-muted);
+  --color-text-muted: var(--color-ink-subtle);
+  --color-text-dim: var(--color-ink-tertiary);
+  --color-text-bright: var(--color-ink);
+  --color-brand-400: var(--color-accent-hover);
+  --color-brand-500: var(--color-accent);
+  --color-brand-600: var(--color-accent);
+  --color-brand-700: var(--color-accent-pressed);
+  --color-accent-600: var(--color-accent);
+
+  /* Type — Linear sans/mono spec uses custom fonts. Closest free analogs
+     are Geist + Geist Mono (already imported) which match the optical
+     weight + tight tracking of Linear Display almost exactly. */
+  --font-sans: "Inter Tight", "Geist", "SF Pro Display", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Inter Tight", "Geist", "SF Pro Display", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", "Berkeley Mono", ui-monospace, monospace;
 }
 
 html, body, #root {
   height: 100%;
+  background: var(--color-canvas);
+  color-scheme: dark;
 }
 
 body {
   margin: 0;
   font-family: var(--font-sans);
-  font-feature-settings: "ss01", "ss03";
+  font-feature-settings: "ss01", "ss03", "cv11";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 button {
@@ -46,14 +83,38 @@ button {
   cursor: pointer;
 }
 
+/* Hairline-thin scrollbars to match Linear's quiet chrome. */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--color-surface-700);
-  border-radius: 4px;
+  background: var(--color-hairline);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-hairline-strong);
 }
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* Focus ring — the only place the brand accent shows outside CTAs. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline-color: var(--color-accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

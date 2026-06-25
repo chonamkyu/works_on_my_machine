@@ -1,65 +1,42 @@
-import { Activity, Cog, LayoutPanelLeft, MessageSquare } from "lucide-react";
-import { clsx } from "clsx";
-import type { View } from "../App";
+import { Cog, Search } from "lucide-react";
 
 interface Props {
-  activityCount: number;
-  view: View;
-  onView: (v: View) => void;
-  hasSelectedTask: boolean;
+  onOpenPalette: () => void;
+  onOpenSettings: () => void;
 }
 
-// memory / evolution / discover are now agent capabilities driven from chat.
-// They still have URL-accessible views (?view=memory etc.) for debugging
-// but are not in the primary nav anymore.
-export function TopBar({ activityCount, view, onView, hasSelectedTask }: Props) {
+/**
+ * Minimal top bar — the previous tab strip is gone; navigation lives in the
+ * ⌘K command palette and the task sidebar. We keep three things here only:
+ *   - wordmark anchor on the left
+ *   - the ⌘K affordance so first-time users discover the palette
+ *   - status (activity counter) + settings (cog) on the right
+ */
+export function TopBar({ onOpenPalette, onOpenSettings }: Props) {
   return (
-    <header className="h-12 border-b border-surface-700 bg-surface-800 flex items-center px-3 gap-2 text-text-secondary">
-      <span className="font-mono text-xs tracking-wider uppercase text-text-muted">
-        platform
+    <header className="h-11 border-b border-hairline bg-canvas flex items-center px-3 gap-3 text-ink-muted">
+      <span className="font-mono text-[11px] tracking-[0.14em] text-ink-subtle select-none">
+        works_on_my_machine
       </span>
       <div className="flex-1" />
-      <NavTab icon={<MessageSquare className="w-3.5 h-3.5" />} label="chat" active={view === "chat"} onClick={() => onView("chat")} />
-      {hasSelectedTask && (
-        <NavTab
-          icon={<LayoutPanelLeft className="w-3.5 h-3.5" />}
-          label="task"
-          active={view === "task"}
-          onClick={() => onView("task")}
-        />
-      )}
-      <NavTab icon={<Cog className="w-3.5 h-3.5" />} label="settings" active={view === "settings"} onClick={() => onView("settings")} />
-      <span className="flex items-center gap-1 text-[11px] text-text-muted px-2">
-        <Activity className="w-3 h-3" />
-        {activityCount}
-      </span>
-      <span className="font-mono text-xs text-text-muted">@nk</span>
+      <button
+        onClick={onOpenPalette}
+        className="group h-7 px-2.5 rounded-md border border-hairline bg-surface-1 hover:border-hairline-strong flex items-center gap-2 text-[12px] text-ink-subtle"
+        data-testid="open-palette"
+      >
+        <Search className="w-3 h-3" />
+        <span>Search or jump…</span>
+        <kbd className="font-mono text-[10px] text-ink-tertiary border border-hairline rounded px-1 py-px ml-3">⌘K</kbd>
+      </button>
+      <button
+        onClick={onOpenSettings}
+        className="h-7 w-7 rounded-md hover:bg-surface-2 flex items-center justify-center text-ink-subtle hover:text-ink"
+        title="Settings · ⌘,"
+        data-testid="open-settings"
+      >
+        <Cog className="w-3.5 h-3.5" />
+      </button>
+      <span className="font-mono text-[11px] text-ink-tertiary pl-1">@nk</span>
     </header>
-  );
-}
-
-function NavTab({
-  icon,
-  label,
-  active,
-  onClick,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      data-testid={`nav-${label}`}
-      className={clsx(
-        "flex items-center gap-1 px-2 py-1 rounded-md text-xs font-mono transition-colors",
-        active ? "bg-surface-700/60 text-text-primary" : "hover:bg-surface-700/40 hover:text-text-primary",
-      )}
-    >
-      {icon}
-      {label}
-    </button>
   );
 }

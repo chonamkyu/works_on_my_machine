@@ -1,18 +1,23 @@
 /**
  * Dashboard surface for workflow authors.
  *
- * - `dashboard.serve(handler)`   — spin an HTTP server on PLATFORM_PORT
- * - `dashboard.serveHtml(html)`  — one-page convenience
- * - `dashboard.route([...])`     — method+path routing
+ * Single-file shortcuts:
+ *   - `dashboard.serve(handler)`   — raw http server on PLATFORM_PORT
+ *   - `dashboard.serveHtml(html)`  — one static HTML page
+ *   - `dashboard.route([...])`     — method+path routing for small surfaces
+ *
+ * Multi-file projects (real api/ + ui/ structure):
+ *   - `dashboard.api(routes, { mount: "/api" })` — typed JSON routes, auto
+ *     /openapi.json + /_docs (Swagger UI) at the mount path
+ *   - `dashboard.serveDir("./ui", { fallback: "index.html" })` — static files
+ *   - `dashboard.bundle({ api, ui })` — combine the two in one call
  *
  * The control plane reverse-proxies `/d/<task_id>/*` to the workflow's
  * loopback port for any `kind: service` workflow that was given one.
- *
- * The React hooks below are stubs; they'll get a real wiring when the
- * dashboard runtime gains a fetch helper.
  */
 
 export { dashboard } from "./server.js";
+export type { RouteDef, RouteSchema, ApiOpts } from "./api.js";
 
 import type { MemoryEntry } from "../index.js";
 

@@ -194,6 +194,10 @@ export const claude = {
     maxTokens?: number;
     temperature?: number;
   }): Promise<string> {
+    if (process.env.PLATFORM_DRY_RUN === "1") {
+      process.stderr.write(`[dry-run] claude.complete(${JSON.stringify({ model: args.model, maxTokens: args.maxTokens })})\n`);
+      return "[dry-run mock completion]";
+    }
     const r = await getClient().complete(args);
     return r.text;
   },

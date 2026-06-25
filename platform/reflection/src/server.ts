@@ -165,6 +165,174 @@ app.post<{ Body: EvolveBody }>("/evolve", async (req, reply) => {
   }
 });
 
+// --- Skill proposal (Phase 3 of Hermes-style self-tuning) ---
+// Given accumulated user memories + recent corrections, propose a new (or
+// updated) skill file that the user can review and accept. The accepted file
+// drops into prompts/users/<userId>/skills/ and is loaded by the generator
+// the next time it runs.
+
+interface SkillProposeBody {
+  userId: string;
+  memories: { topic: string; content: string; pinned?: boolean }[];
+  recentCorrections?: string[];
+  existingSkills?: { name: string; body: string }[];
+}
+
+interface SkillProposeResult {
+  skill_name: string;
+  skill_body: string;
+  rationale: string;
+  confidence: "low" | "medium" | "high";
+  applies_when: string;
+}
+
+const SKILL_PROPOSE_SYSTEM = `You curate per-user skill files for a self-evolving
+agent platform. A "skill" is a small markdown file that gets appended to the
+agent's system prompt only for this user.
+
+Given (a) the user's memories, (b) recent corrections they made to the agent,
+and (c) the user's existing skill files, propose ONE new or updated skill file
+that captures durable, generalizable guidance for the agent.
+
+Reply with ONE JSON object, no markdown:
+{
+  "skill_name": "<kebab-case slug, will be the filename>",
+  "skill_body": "<full markdown content of the skill>",
+  "rationale": "<one-sentence why this skill is worth adding>",
+  "confidence": "low" | "medium" | "high",
+  "applies_when": "always" | "tag:<id>"
+}
+
+Strict rules:
+- Only propose a skill if there is a CLEAR pattern across multiple memories or
+  multiple corrections. One-offs don't justify a skill.
+- skill_body should be terse markdown — bullet rules and short explanations,
+  NOT prose. The agent reads this every turn.
+- Do NOT duplicate guidance already in existing_skills.
+- If you can't find a high-quality skill to propose, set confidence: "low" and
+  skill_body: "" — the platform will skip it.
+- skill_name MUST be unique vs existing_skills.
+- applies_when: "always" by default, or "tag:dashboard" if it's only relevant
+  to UI/service tasks.`;
+
+app.post<{ Body: SkillProposeBody }>("/propose-skill", async (req, reply) => {
+  const body = req.body;
+  const userMsg = [
+    `User has ${body.memories.length} memories.`,
+    body.memories.length
+      ? `MEMORIES:\n${body.memories.slice(0, 30).map((m) => `  ${m.pinned ? "★" : "·"} ${m.topic}: ${m.content}`).join("\n")}`
+      : "MEMORIES: (none)",
+    body.recentCorrections?.length
+      ? `RECENT CORRECTIONS:\n${body.recentCorrections.slice(0, 15).map((c) => `  - ${c}`).join("\n")}`
+      : "RECENT CORRECTIONS: (none)",
+    body.existingSkills?.length
+      ? `EXISTING SKILLS (don't duplicate):\n${body.existingSkills.map((s) => `--- ${s.name} ---\n${s.body.slice(0, 800)}`).join("\n\n")}`
+      : "EXISTING SKILLS: (none)",
+  ].join("\n\n");
+  try {
+    const out = await llm.completeJSON<SkillProposeResult>({
+      messages: [
+        { role: "system", content: SKILL_PROPOSE_SYSTEM },
+        { role: "user", content: userMsg },
+      ],
+      maxTokens: 2500,
+    });
+    return reply.send(out);
+  } catch (err) {
+    return reply.status(502).send({ error: (err as Error).message });
+  }
+});
+
+// --- Chat-turn reflection (Phase 1 of Hermes-style self-tuning) ---
+// Workflow-run reflection above looks at structured run outcomes. This one
+// looks at a chat turn (user message + agent reply + optional correction
+// signal) and extracts durable USER-LEVEL signals — preferences, domain
+// context, hard rules. Those become memory_entries with scope=user that the
+// generator retrieves on the next turn.
+
+interface ChatReflectBody {
+  userId: string;
+  sessionId: string;
+  userMessage: string;
+  agentReply: string;
+  /** Set true when the user message looks like a correction of the prior
+   *  agent reply ("아니", "no, ...", "다시", "그게 아니라"). The reflection
+   *  uses this to weight extraction toward hard-rule memories. */
+  isCorrection?: boolean;
+  /** Conversation context — last few turns so reflection sees the topic. */
+  recentTurns?: { role: "user" | "assistant"; content: string }[];
+  /** Memories the generator already retrieved this turn — reflection should
+   *  avoid duplicating these. */
+  knownMemory?: { topic: string; content: string }[];
+}
+
+interface ChatReflectionResult {
+  memory_updates: Array<{ topic: string; content: string; pinned?: boolean }>;
+  profile_suggestions?: Record<string, string>;
+  signal: "neutral" | "positive" | "corrective";
+  notes?: string;
+}
+
+const CHAT_REFLECT_SYSTEM = `You distill a chat exchange between a user and a workflow-platform agent
+into durable, user-scope memories. Output ONE JSON object, no markdown.
+
+Schema:
+{
+  "memory_updates": [{ "topic": string, "content": string, "pinned": bool? }],
+  "profile_suggestions": { "preferred_language"?: string, "reply_tone"?: "terse"|"expansive",
+                           "expertise_level"?: "novice"|"intermediate"|"senior" },
+  "signal": "neutral" | "positive" | "corrective",
+  "notes": string?
+}
+
+Strict rules:
+- Only emit memories that will be useful LATER, in a different chat session,
+  to a DIFFERENT task. NEVER memorize one-shot task details (e.g. "user wants
+  a naver news dashboard right now") — those belong to that task's own chat
+  history.
+- DO memorize stable preferences ("user prefers Korean replies", "always use
+  Sonnet for run-time LLM", "company Slack channel is #engineering"),
+  recurring corrections ("never use console.log, always ctx.log"),
+  and tool/connector setup ("user has 'work' GitHub credential, default to
+  it").
+- Skip topics that duplicate the supplied known_memory list.
+- "pinned": true ONLY for hard rules the user said explicitly ("absolutely
+  never X", "always Y"). Otherwise false.
+- "signal": "corrective" if the user pushed back on the previous reply,
+  "positive" if they explicitly thanked / accepted, otherwise "neutral".
+- If nothing is worth saving, return memory_updates: [] and signal: "neutral".
+- Topics should be kebab-case slugs (preference-language, slack-channel-engineering).
+- Content should be a single sentence in the user's primary language.`;
+
+app.post<{ Body: ChatReflectBody }>("/reflect-chat", async (req, reply) => {
+  const body = req.body;
+  const userMsg = [
+    body.isCorrection ? "(this is flagged as a CORRECTION turn)" : "",
+    "Recent conversation:",
+    ...(body.recentTurns ?? []).slice(-6).map((t) => `  [${t.role}] ${t.content.slice(0, 600)}`),
+    "",
+    `User's latest message:\n  ${body.userMessage.slice(0, 1500)}`,
+    `Agent's reply:\n  ${body.agentReply.slice(0, 1500)}`,
+    "",
+    body.knownMemory?.length
+      ? `Memories already loaded this turn (DO NOT duplicate):\n${body.knownMemory.map((m) => `  - ${m.topic}: ${m.content}`).join("\n")}`
+      : "Memories already loaded this turn: (none)",
+  ].filter(Boolean).join("\n");
+
+  try {
+    const out = await llm.completeJSON<ChatReflectionResult>({
+      messages: [
+        { role: "system", content: CHAT_REFLECT_SYSTEM },
+        { role: "user", content: userMsg },
+      ],
+      maxTokens: 1200,
+    });
+    return reply.send(out);
+  } catch (err) {
+    return reply.status(502).send({ error: (err as Error).message });
+  }
+});
+
 const port = Number(process.env.PORT ?? 8082);
 app.listen({ host: "0.0.0.0", port }).then(() => {
   console.log(`reflection listening on :${port}`);

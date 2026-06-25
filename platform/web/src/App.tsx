@@ -4,75 +4,113 @@ import { api, subscribe } from "./lib/api";
 import { TopBar } from "./components/TopBar";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
-import { TaskDetail } from "./components/TaskDetail";
-import { MemoryView } from "./components/MemoryView";
-import { EvolutionView } from "./components/EvolutionView";
-import { SettingsView } from "./components/SettingsView";
-import { DiscoverView } from "./components/DiscoverView";
+import { CommandPalette } from "./components/CommandPalette";
+import { SettingsOverlay, type OverlayTab } from "./components/SettingsOverlay";
+import { UIPane, type PaneTab } from "./components/UIPane";
 
 const USER_ID = "u_local";
-export type View = "chat" | "task" | "memory" | "evolution" | "discover" | "settings";
 
-const VALID_VIEWS: View[] = ["chat", "memory", "evolution", "discover", "settings"];
+// Every meaningful piece of UI state lives in the URL so links are shareable
+// and a refresh restores the layout exactly. Booleans use "1"/missing, the
+// overlay tab is its slug, the active task is its id.
+// Every meaningful piece of UI state lives in the URL so links are shareable
+// and a refresh restores the layout exactly.
+interface QueryState {
+  task: string | null;
+  overlay: OverlayTab | null;
+  // pane: open or collapsed (the unified right-side panel). default is open.
+  pane: boolean;
+  // paneTab: which tab is active in the right panel.
+  paneTab: PaneTab | null;
+  // sidebar: true means collapsed.
+  sidebar: boolean;
+}
 
-function readQuery(): { task: string | null; view: View } {
+function readQuery(): QueryState {
   const q = new URLSearchParams(window.location.search);
-  const v = q.get("view") as View | null;
+  const paneRaw = q.get("pane");
   return {
     task: q.get("task"),
-    view: v && VALID_VIEWS.includes(v) ? v : "chat",
+    overlay: q.get("overlay") as OverlayTab | null,
+    pane: paneRaw === null ? true : paneRaw === "1",
+    paneTab: (q.get("paneTab") as PaneTab | null) || null,
+    sidebar: q.get("sidebar") === "0",
   };
 }
-function writeQuery(patch: { task?: string | null; view?: View }) {
+
+function writeQuery(patch: Partial<QueryState>) {
   const url = new URL(window.location.href);
-  if (patch.task !== undefined) {
-    if (patch.task) url.searchParams.set("task", patch.task);
-    else url.searchParams.delete("task");
-  }
-  if (patch.view !== undefined) {
-    if (patch.view && patch.view !== "chat") url.searchParams.set("view", patch.view);
-    else url.searchParams.delete("view");
-  }
+  const set = (k: string, v: string | null | undefined) => {
+    if (v === undefined) return;
+    if (v === null || v === "") url.searchParams.delete(k);
+    else url.searchParams.set(k, v);
+  };
+  if (patch.task !== undefined) set("task", patch.task);
+  if (patch.overlay !== undefined) set("overlay", patch.overlay);
+  if (patch.pane !== undefined) set("pane", patch.pane ? null : "0");
+  if (patch.paneTab !== undefined) set("paneTab", patch.paneTab);
+  if (patch.sidebar !== undefined) set("sidebar", patch.sidebar ? "0" : null);
   window.history.replaceState({}, "", url.toString());
 }
 
 export function App() {
   const initial = readQuery();
   const [tasks, setTasks] = useState<Task[]>([]);
+
   const [selectedTaskId, setSelectedTaskIdState] = useState<string | null>(initial.task);
   const setSelectedTaskId = (id: string | null) => {
     setSelectedTaskIdState(id);
     writeQuery({ task: id });
   };
-  const [showDetail, setShowDetail] = useState(false);
-  const [activityCount, setActivityCount] = useState(0);
-  const [pulses, setPulses] = useState<Record<string, number>>({});
-  const [view, setViewState] = useState<View>(initial.view);
-  const setView = (v: View) => {
-    setViewState(v);
-    writeQuery({ view: v });
+
+  // The unified right panel (UI / Code / State / Triggers / Runs / Logs /
+  // Caps). Open by default for every task; ⌘. or ⌘U or the chevron toggles.
+  const [paneOpen, setPaneOpenState] = useState(initial.pane);
+  const setPaneOpen = (v: boolean | ((p: boolean) => boolean)) => {
+    setPaneOpenState((prev) => {
+      const next = typeof v === "function" ? v(prev) : v;
+      writeQuery({ pane: next });
+      return next;
+    });
   };
+  const [paneTab, setPaneTabState] = useState<PaneTab | null>(initial.paneTab);
+  const setPaneTab = (t: PaneTab) => {
+    setPaneTabState(t);
+    writeQuery({ paneTab: t });
+  };
+
+  const [sidebarCollapsed, setSidebarCollapsedState] = useState(initial.sidebar);
+  const setSidebarCollapsed = (v: boolean | ((p: boolean) => boolean)) => {
+    setSidebarCollapsedState((prev) => {
+      const next = typeof v === "function" ? v(prev) : v;
+      writeQuery({ sidebar: next });
+      return next;
+    });
+  };
+
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [overlay, setOverlayState] = useState<OverlayTab | null>(initial.overlay);
+  const setOverlay = (t: OverlayTab | null) => {
+    setOverlayState(t);
+    writeQuery({ overlay: t });
+  };
+  const [pulses, setPulses] = useState<Record<string, number>>({});
 
   const refresh = useCallback(async () => {
     const { tasks } = await api.listTasks();
     setTasks(tasks ?? []);
   }, []);
-
-  useEffect(() => {
-    refresh().catch(console.error);
-  }, [refresh]);
+  useEffect(() => { refresh().catch(console.error); }, [refresh]);
 
   useEffect(() => {
     const stop = subscribe(`/v1/users/${USER_ID}/activity`, (msg: SSEMessage) => {
-      setActivityCount((n) => n + 1);
       if (msg.channel.startsWith("trigger:fired:")) {
         const taskId = msg.channel.slice("trigger:fired:".length);
         setPulses((p) => ({ ...p, [taskId]: Date.now() }));
       }
-      if (msg.channel.startsWith("task:deleted:")) {
-        const deletedId = msg.channel.slice("task:deleted:".length).split(":")[0];
-        // If the currently-open task was deleted elsewhere, clear it.
-        if (deletedId && deletedId === selectedTaskId) setSelectedTaskId(null);
+      if (msg.channel.startsWith("task:archived:")) {
+        const archivedId = msg.channel.slice("task:archived:".length).split(":")[0];
+        if (archivedId && archivedId === selectedTaskId) setSelectedTaskId(null);
         refresh().catch(console.error);
         return;
       }
@@ -87,110 +125,151 @@ export function App() {
     return stop;
   }, [refresh, selectedTaskId]);
 
-  // Reconcile: if the URL points at a task that no longer exists, clear it.
   useEffect(() => {
     if (!selectedTaskId) return;
     if (!tasks.length) return;
-    if (!tasks.find((t) => t.id === selectedTaskId)) {
-      setSelectedTaskId(null);
-    }
+    if (!tasks.find((t) => t.id === selectedTaskId)) setSelectedTaskId(null);
   }, [tasks, selectedTaskId]);
+
+  // When the user switches tasks, reset the active pane tab so we re-derive
+  // the sensible default ("ui" for service, "state" for oneshot) on the
+  // first render of the new task. Open/closed pref stays the same.
+  useEffect(() => {
+    setPaneTabState(null);
+    writeQuery({ paneTab: null });
+  }, [selectedTaskId]);
+
+  // Global keyboard shortcuts. Linear-style: every primary surface has one
+  // dedicated key, and the palette catches the rest.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const meta = e.metaKey || e.ctrlKey;
+      if (!meta) return;
+      if (e.key === "k") { e.preventDefault(); setPaletteOpen((v) => !v); }
+      else if (e.key === "." || e.key === "u") { e.preventDefault(); setPaneOpen((v) => !v); }
+      else if (e.key === ",") { e.preventDefault(); setOverlay(overlay ? null : "settings"); }
+      else if (e.key === "b") { e.preventDefault(); setSidebarCollapsed((v) => !v); }
+      else if (e.key === "n") {
+        e.preventDefault();
+        void (async () => {
+          const t = await api.createTask({ name: "draft", description: "", triggers: [], capabilities: [] });
+          await refresh();
+          setSelectedTaskId(t.id);
+        })();
+      }
+      // ⌘1/2/3 conflict with browser tab-switching and tripped accidental
+      // overlays — removed. Use ⌘K palette or ⌘, settings instead.
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [overlay, refresh]);
 
   const selectedTask = useMemo(
     () => (tasks ?? []).find((t) => t.id === selectedTaskId) ?? null,
     [tasks, selectedTaskId],
   );
 
-  // 1:1 chat-per-task model. No fallback session — if nothing is selected
-  // the chat area shows an empty-state instead of a phantom global session.
+  // 1:1 chat-per-task model. sessionId == taskId.
   const sessionId = selectedTaskId;
 
   return (
-    <div className="h-full flex flex-col bg-surface-900 text-text-primary">
+    <div className="h-full flex flex-col bg-canvas text-ink">
       <TopBar
-        activityCount={activityCount}
-        view={view}
-        onView={setView}
-        hasSelectedTask={!!selectedTaskId}
+        onOpenPalette={() => setPaletteOpen(true)}
+        onOpenSettings={() => setOverlay("settings")}
       />
       <div className="flex-1 flex min-h-0">
         <Sidebar
           tasks={tasks}
           selectedTaskId={selectedTaskId}
+          collapsed={sidebarCollapsed}
+          onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
           onSelectTask={(id) => {
             setSelectedTaskId(id || null);
-            setView("chat");
-            setShowDetail(false);
           }}
           onChanged={refresh}
           pulses={pulses}
         />
-        {view === "chat" && (
+        {sessionId ? (
           <>
-            {sessionId ? (
-              <ChatPane
-                sessionId={sessionId}
-                taskName={selectedTask?.name ?? "task"}
-                taskId={selectedTask?.id}
-                taskKind={selectedTask?.kind}
-                onOpenDetail={() => selectedTask && setShowDetail(true)}
-                onTaskCreated={async (newId) => {
-                  await refresh();
-                  if (newId) setSelectedTaskId(newId);
-                }}
-              />
-            ) : (
-              <EmptyChat
-                onNewTask={async () => {
-                  const t = await api.createTask({
-                    name: "draft",
-                    description: "",
-                    triggers: [],
-                    capabilities: [],
-                  });
-                  await refresh();
-                  setSelectedTaskId(t.id);
-                }}
-              />
-            )}
-            {showDetail && selectedTask && (
-              <TaskDetail
+            <ChatPane
+              key={sessionId}
+              sessionId={sessionId}
+              taskName={selectedTask?.name ?? "task"}
+              taskId={selectedTask?.id}
+              taskKind={selectedTask?.kind}
+              paneOpen={paneOpen}
+              onExpandPane={() => setPaneOpen(true)}
+              onRenameTask={selectedTask ? async (name) => {
+                await api.renameTask(selectedTask.id, name);
+                await refresh();
+              } : undefined}
+              onTaskCreated={async (newId) => {
+                await refresh();
+                if (newId) setSelectedTaskId(newId);
+              }}
+            />
+            {paneOpen && selectedTask && (
+              <UIPane
                 task={selectedTask}
-                onClose={() => setShowDetail(false)}
+                initialTab={paneTab}
+                onTabChange={setPaneTab}
+                onCollapse={() => setPaneOpen(false)}
                 onChanged={refresh}
               />
             )}
           </>
-        )}
-        {view === "task" && selectedTask && (
-          <TaskDetail
-            task={selectedTask}
-            inline
-            onClose={() => setView("chat")}
-            onChanged={refresh}
+        ) : (
+          <EmptyChat
+            onNewTask={async () => {
+              const t = await api.createTask({
+                name: "draft",
+                description: "",
+                triggers: [],
+                capabilities: [],
+              });
+              await refresh();
+              setSelectedTaskId(t.id);
+            }}
           />
         )}
-        {view === "memory" && <MemoryView />}
-        {view === "evolution" && <EvolutionView />}
-        {view === "discover" && <DiscoverView />}
-        {view === "settings" && <SettingsView />}
       </div>
+
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        tasks={tasks}
+        onSelectTask={(id) => setSelectedTaskId(id)}
+        onNewTask={async () => {
+          const t = await api.createTask({ name: "draft", description: "", triggers: [], capabilities: [] });
+          await refresh();
+          setSelectedTaskId(t.id);
+        }}
+        onOpenView={(v) => setOverlay(v)}
+      />
+
+      <SettingsOverlay
+        open={overlay !== null}
+        tab={overlay ?? "settings"}
+        onTab={(t) => setOverlay(t)}
+        onClose={() => setOverlay(null)}
+      />
     </div>
   );
 }
 
 function EmptyChat({ onNewTask }: { onNewTask: () => Promise<void> }) {
   return (
-    <main className="flex-1 flex flex-col items-center justify-center min-w-0 text-text-muted">
-      <p className="text-sm mb-3">No task selected.</p>
+    <main className="flex-1 flex flex-col items-center justify-center min-w-0 text-ink-muted">
+      <p className="text-[15px] mb-4 text-ink">Pick a task on the left, or start a new one.</p>
       <button
         onClick={() => void onNewTask()}
-        className="h-8 px-4 rounded bg-brand-600 text-white text-xs"
+        className="h-9 px-4 rounded-md bg-accent text-white text-[13px] hover:bg-accent-hover"
       >
         + New task
       </button>
-      <p className="mt-4 text-[11px] text-text-dim font-mono">
-        pick one from the left, or start a new one
+      <p className="mt-4 text-[11px] font-mono text-ink-tertiary">
+        ⌘N new · ⌘K palette · ⌘, settings · ⌘. panel · ⌘B sidebar
       </p>
     </main>
   );

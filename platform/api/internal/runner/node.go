@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -117,6 +118,176 @@ func (r *NodeRunner) Cancel(runID string) bool {
 	return true
 }
 
+// DryRunResult is the structured outcome of a smoke-run with mocked
+// connectors. ExitCode == 0 and empty FatalError means the workflow at
+// least loaded + reached its first awaited boundary without crashing.
+type DryRunResult struct {
+	OK         bool     `json:"ok"`
+	ExitCode   int      `json:"exitCode"`
+	FatalError string   `json:"fatalError,omitempty"`
+	Stdout     []string `json:"stdout,omitempty"`
+	Stderr     []string `json:"stderr,omitempty"`
+	DurationMs int      `json:"durationMs"`
+	TimedOut   bool     `json:"timedOut,omitempty"`
+}
+
+// RunDry spawns the workflow with PLATFORM_DRY_RUN=1 so SDK connectors return
+// mocks. The point is to catch hallucinated SDK methods, missing imports,
+// syntax errors, undefined variables — anything that would fail at load or
+// in the first awaited tick. The workflow is killed after a tight budget
+// (default 20s) since a healthy oneshot exits fast under mocks, and a
+// healthy service binds + parks (which we treat as "ok" once stable).
+func (r *NodeRunner) RunDry(parent context.Context, task *store.Task, budget time.Duration) DryRunResult {
+	if budget == 0 {
+		budget = 20 * time.Second
+	}
+	res := DryRunResult{}
+	start := time.Now()
+	defer func() { res.DurationMs = int(time.Since(start).Milliseconds()) }()
+
+	dir := r.files.Dir(task.ID)
+	if _, err := os.Stat(filepath.Join(dir, "main.ts")); err != nil {
+		res.FatalError = fmt.Sprintf("no main.ts: %v", err)
+		return res
+	}
+	if err := r.ensureSDKSymlink(dir); err != nil {
+		res.FatalError = fmt.Sprintf("sdk link: %v", err)
+		return res
+	}
+	if err := r.writeLauncher(dir); err != nil {
+		res.FatalError = fmt.Sprintf("launcher: %v", err)
+		return res
+	}
+	if err := r.installDeps(parent, task, nil, dir); err != nil {
+		res.FatalError = fmt.Sprintf("install deps: %v", err)
+		return res
+	}
+
+	ctx, cancel := context.WithTimeout(parent, budget)
+	defer cancel()
+
+	args := []string{"--experimental-strip-types", "--no-warnings", "_launcher.mjs"}
+	cmd := exec.CommandContext(ctx, r.node, args...)
+	cmd.Dir = dir
+	// Build env WITHOUT allocating a real loopback port — the actual service
+	// daemon already owns that port. Dry-run uses a one-off mock port so the
+	// SDK's dashboard.serve() can bind on its own ephemeral socket.
+	env := os.Environ()
+	env = append(env,
+		"PLATFORM_RUN_ID=dry-run",
+		"PLATFORM_TASK_ID="+task.ID,
+		"PLATFORM_USER_ID="+task.UserID,
+		"PLATFORM_DRY_RUN=1",
+	)
+	if task.Kind == "service" {
+		// Pick a free port so dashboard.serve() succeeds during dry-run.
+		// We don't reserve it in portreg — it's released as soon as the
+		// dry-run process exits.
+		if p, err := pickFreePortLocal(); err == nil {
+			env = append(env, fmt.Sprintf("PLATFORM_PORT=%d", p))
+		}
+	}
+	cmd.Env = env
+
+	stdoutPipe, _ := cmd.StdoutPipe()
+	stderrPipe, _ := cmd.StderrPipe()
+
+	if err := cmd.Start(); err != nil {
+		res.FatalError = fmt.Sprintf("spawn: %v", err)
+		return res
+	}
+
+	// Read up to ~200 lines each side so we have enough for diagnosis but
+	// don't unbounded-buffer if the workflow is chatty.
+	res.Stdout = readLines(stdoutPipe, 200)
+	res.Stderr = readLines(stderrPipe, 200)
+
+	waitErr := cmd.Wait()
+	res.ExitCode = -1
+	if waitErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(waitErr, &exitErr) {
+			res.ExitCode = exitErr.ExitCode()
+		}
+	} else {
+		res.ExitCode = 0
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		res.TimedOut = true
+		// Service-style workflows are SUPPOSED to park forever — treat
+		// "timed out + no fatal stderr signals" as a soft success.
+		if task.Kind == "service" && !stderrHasFatal(res.Stderr) {
+			res.OK = true
+			return res
+		}
+		res.FatalError = "dry-run timed out without exiting"
+		return res
+	}
+	if stderrHasFatal(res.Stderr) {
+		res.FatalError = firstFatal(res.Stderr)
+		return res
+	}
+	res.OK = res.ExitCode == 0
+	return res
+}
+
+// stderrHasFatal scans for runtime errors that almost always mean broken
+// generated code (vs. a logged warning).
+func stderrHasFatal(lines []string) bool {
+	for _, l := range lines {
+		if strings.Contains(l, "TypeError:") ||
+			strings.Contains(l, "ReferenceError:") ||
+			strings.Contains(l, "SyntaxError:") ||
+			strings.Contains(l, "Cannot find module") ||
+			strings.Contains(l, "Cannot read prop") ||
+			strings.Contains(l, "is not a function") {
+			return true
+		}
+	}
+	return false
+}
+
+func firstFatal(lines []string) string {
+	for _, l := range lines {
+		if strings.Contains(l, "Error:") || strings.Contains(l, "is not a function") {
+			return strings.TrimSpace(l)[:min(300, len(l))]
+		}
+	}
+	return ""
+}
+
+func readLines(rc io.ReadCloser, max int) []string {
+	out := []string{}
+	scan := bufio.NewScanner(rc)
+	scan.Buffer(make([]byte, 0, 65536), 1<<20)
+	for scan.Scan() {
+		if len(out) >= max {
+			continue
+		}
+		out = append(out, scan.Text())
+	}
+	return out
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// pickFreePortLocal asks the OS for an ephemeral TCP port. Used by dry-run
+// only — portreg.pickFreePort is package-private so we keep a small
+// duplicate here rather than exporting it.
+func pickFreePortLocal() (int, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port, nil
+}
+
 func (r *NodeRunner) execute(ctx context.Context, task *store.Task, run *store.Run) {
 	dir := r.files.Dir(task.ID)
 	if _, err := os.Stat(filepath.Join(dir, "main.ts")); err != nil {
@@ -221,16 +392,41 @@ func (r *NodeRunner) afterTerminal(task *store.Task, run *store.Run) {
 
 func (r *NodeRunner) childEnv(task *store.Task, run *store.Run) []string {
 	env := os.Environ()
+	runID := "dry-run"
+	if run != nil {
+		runID = run.ID
+	}
 	env = append(env,
-		"PLATFORM_RUN_ID="+run.ID,
+		"PLATFORM_RUN_ID="+runID,
 		"PLATFORM_TASK_ID="+task.ID,
 		"PLATFORM_USER_ID="+task.UserID,
 	)
-	// Service workflows get a stable loopback port for their dashboard
-	// HTTP server. The control plane reverse-proxies /d/<task>/* to it.
+	// Service workflows expose one or more named HTTP surfaces (UI, API, …).
+	// Allocate a loopback port per declared TaskPort and inject as
+	// `PLATFORM_PORT_<NAME_UPPER>=<n>`. The legacy `PLATFORM_PORT` env stays
+	// pointing at the role=="ui" port so existing one-port workflows keep
+	// working unchanged.
 	if r.ports != nil && task.Kind == "service" {
-		if port, err := r.ports.Allocate(task.ID); err == nil {
-			env = append(env, fmt.Sprintf("PLATFORM_PORT=%d", port))
+		declared := task.Ports
+		if len(declared) == 0 {
+			// Implicit single UI port for tasks that haven't declared any —
+			// matches the pre-multi-port behavior exactly.
+			declared = []store.TaskPort{{Name: "ui", Role: "ui"}}
+		}
+		var uiPort int
+		for _, p := range declared {
+			port, err := r.ports.AllocateNamed(task.ID, p.Name, p.Role)
+			if err != nil {
+				continue
+			}
+			envName := "PLATFORM_PORT_" + strings.ToUpper(strings.ReplaceAll(p.Name, "-", "_"))
+			env = append(env, fmt.Sprintf("%s=%d", envName, port))
+			if p.Role == "ui" || (uiPort == 0 && p.Name == "ui") {
+				uiPort = port
+			}
+		}
+		if uiPort != 0 {
+			env = append(env, fmt.Sprintf("PLATFORM_PORT=%d", uiPort))
 		}
 	}
 	if r.creds != nil {

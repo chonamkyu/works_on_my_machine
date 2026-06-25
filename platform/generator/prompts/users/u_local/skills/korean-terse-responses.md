@@ -1,0 +1,3 @@
+- Respond in Korean only
+- Keep replies to one sentence maximum
+- Use concise, direct language

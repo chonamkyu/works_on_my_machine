@@ -85,7 +85,7 @@ func (m *Memory) Seed(ctx context.Context) {
 
 // --- tasks ------------------------------------------------------------
 
-const taskColumns = `id, user_id, name, description, status, triggers, capabilities, model_config, kind, created_at, updated_at`
+const taskColumns = `id, user_id, name, description, status, triggers, capabilities, model_config, kind, ports, created_at, updated_at`
 
 func (m *Memory) ListTasks(userID string) []*Task {
 	ctx := context.Background()
@@ -165,16 +165,17 @@ func (m *Memory) insertTask(ctx context.Context, t *Task) error {
 	triggersJSON, _ := json.Marshal(t.Triggers)
 	capsJSON, _ := json.Marshal(t.Capabilities)
 	modelJSON, _ := json.Marshal(t.Model)
+	portsJSON, _ := json.Marshal(orEmptyPorts(t.Ports))
 	kind := t.Kind
 	if kind == "" {
 		kind = "oneshot"
 	}
 	_, err := m.pool.Exec(ctx, `
-		INSERT INTO tasks (id, user_id, name, description, status, triggers, capabilities, model_config, kind, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		INSERT INTO tasks (id, user_id, name, description, status, triggers, capabilities, model_config, kind, ports, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		ON CONFLICT (id) DO NOTHING`,
 		t.ID, t.UserID, t.Name, t.Description, t.Status,
-		triggersJSON, capsJSON, modelJSON, kind, t.CreatedAt, t.UpdatedAt)
+		triggersJSON, capsJSON, modelJSON, kind, portsJSON, t.CreatedAt, t.UpdatedAt)
 	return err
 }
 
@@ -188,15 +189,41 @@ func (m *Memory) UpdateTask(id string, mutate func(*Task)) (*Task, error) {
 	triggersJSON, _ := json.Marshal(t.Triggers)
 	capsJSON, _ := json.Marshal(t.Capabilities)
 	modelJSON, _ := json.Marshal(t.Model)
+	portsJSON, _ := json.Marshal(orEmptyPorts(t.Ports))
 	kind := t.Kind
 	if kind == "" {
 		kind = "oneshot"
 	}
 	_, err = m.pool.Exec(context.Background(), `
-		UPDATE tasks SET name=$1, description=$2, status=$3, triggers=$4, capabilities=$5, model_config=$6, kind=$7, updated_at=$8
-		WHERE id=$9`,
-		t.Name, t.Description, t.Status, triggersJSON, capsJSON, modelJSON, kind, t.UpdatedAt, id)
+		UPDATE tasks SET name=$1, description=$2, status=$3, triggers=$4, capabilities=$5, model_config=$6, kind=$7, ports=$8, updated_at=$9
+		WHERE id=$10`,
+		t.Name, t.Description, t.Status, triggersJSON, capsJSON, modelJSON, kind, portsJSON, t.UpdatedAt, id)
 	return t, err
+}
+
+func orEmptyPorts(p []TaskPort) []TaskPort {
+	if p == nil {
+		return []TaskPort{}
+	}
+	return p
+}
+
+// SweepOrphanRuns marks any run that's still in 'running' or 'queued' as
+// cancelled. Called once at boot — anything that survived across a process
+// restart can't possibly still be in flight, and leaving them as "running"
+// pollutes the Runs tab (the user saw 7 orphans for a single service task).
+func (m *Memory) SweepOrphanRuns() (int, error) {
+	tag, err := m.pool.Exec(context.Background(), `
+		UPDATE runs
+		SET state='cancelled',
+		    finished_at=now(),
+		    duration_ms=COALESCE(duration_ms, 0),
+		    error=COALESCE(NULLIF(error,''), 'orphan: api restart')
+		WHERE state IN ('running','queued') AND finished_at IS NULL`)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 func (m *Memory) DeleteTask(id string) error {
@@ -211,6 +238,97 @@ func (m *Memory) DeleteTask(id string) error {
 	// too. messages cascade via the FK on sessions.id.
 	_, _ = m.pool.Exec(context.Background(), `DELETE FROM sessions WHERE id=$1`, id)
 	return nil
+}
+
+// ArchivedTask is the snapshot kept after a task is deleted. Code lives in
+// `Files` as a filename -> body map (main.ts, workflow.yaml, …).
+type ArchivedTask struct {
+	ID           string            `json:"id"`
+	UserID       string            `json:"userId"`
+	Name         string            `json:"name"`
+	Description  string            `json:"description"`
+	Kind         string            `json:"kind"`
+	Triggers     []Trigger         `json:"triggers"`
+	Capabilities []string          `json:"capabilities"`
+	Model        ModelConfig       `json:"model"`
+	Files        map[string]string `json:"files"`
+	CreatedAt    time.Time         `json:"createdAt"`
+	DeletedAt    time.Time         `json:"deletedAt"`
+}
+
+// ArchiveTask preserves a task's metadata + on-disk source files before the
+// live row is dropped. Safe to call before or after DeleteTask — the archive
+// table has no FK to tasks.
+func (m *Memory) ArchiveTask(t *Task, files map[string]string) error {
+	if t == nil {
+		return errors.New("ArchiveTask: nil task")
+	}
+	triggersJSON, _ := json.Marshal(t.Triggers)
+	capsJSON, _ := json.Marshal(t.Capabilities)
+	modelJSON, _ := json.Marshal(t.Model)
+	if files == nil {
+		files = map[string]string{}
+	}
+	filesJSON, _ := json.Marshal(files)
+	kind := t.Kind
+	if kind == "" {
+		kind = "oneshot"
+	}
+	_, err := m.pool.Exec(context.Background(), `
+		INSERT INTO task_archive (id, user_id, name, description, kind, triggers, capabilities, model_config, files, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		ON CONFLICT (id) DO UPDATE SET
+		  name=EXCLUDED.name, description=EXCLUDED.description, kind=EXCLUDED.kind,
+		  triggers=EXCLUDED.triggers, capabilities=EXCLUDED.capabilities,
+		  model_config=EXCLUDED.model_config, files=EXCLUDED.files,
+		  deleted_at=now()`,
+		t.ID, t.UserID, t.Name, t.Description, kind, triggersJSON, capsJSON, modelJSON, filesJSON, t.CreatedAt)
+	return err
+}
+
+func (m *Memory) ListArchivedTasks(userID string) []*ArchivedTask {
+	rows, err := m.pool.Query(context.Background(), `
+		SELECT id, user_id, name, description, kind, triggers, capabilities, model_config, files, created_at, deleted_at
+		FROM task_archive WHERE user_id=$1 ORDER BY deleted_at DESC`, userID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []*ArchivedTask
+	for rows.Next() {
+		var a ArchivedTask
+		var triggersJSON, capsJSON, modelJSON, filesJSON []byte
+		if err := rows.Scan(&a.ID, &a.UserID, &a.Name, &a.Description, &a.Kind,
+			&triggersJSON, &capsJSON, &modelJSON, &filesJSON, &a.CreatedAt, &a.DeletedAt); err != nil {
+			continue
+		}
+		_ = json.Unmarshal(triggersJSON, &a.Triggers)
+		_ = json.Unmarshal(capsJSON, &a.Capabilities)
+		_ = json.Unmarshal(modelJSON, &a.Model)
+		_ = json.Unmarshal(filesJSON, &a.Files)
+		out = append(out, &a)
+	}
+	return out
+}
+
+func (m *Memory) GetArchivedTask(id string) (*ArchivedTask, error) {
+	row := m.pool.QueryRow(context.Background(), `
+		SELECT id, user_id, name, description, kind, triggers, capabilities, model_config, files, created_at, deleted_at
+		FROM task_archive WHERE id=$1`, id)
+	var a ArchivedTask
+	var triggersJSON, capsJSON, modelJSON, filesJSON []byte
+	if err := row.Scan(&a.ID, &a.UserID, &a.Name, &a.Description, &a.Kind,
+		&triggersJSON, &capsJSON, &modelJSON, &filesJSON, &a.CreatedAt, &a.DeletedAt); err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	_ = json.Unmarshal(triggersJSON, &a.Triggers)
+	_ = json.Unmarshal(capsJSON, &a.Capabilities)
+	_ = json.Unmarshal(modelJSON, &a.Model)
+	_ = json.Unmarshal(filesJSON, &a.Files)
+	return &a, nil
 }
 
 // --- runs -------------------------------------------------------------
@@ -444,15 +562,19 @@ func scanTask(rows pgx.Rows) (*Task, error) {
 
 func scanTaskScanner(s rowScanner) (*Task, error) {
 	var t Task
-	var triggersJSON, capsJSON, modelJSON []byte
-	if err := s.Scan(&t.ID, &t.UserID, &t.Name, &t.Description, &t.Status, &triggersJSON, &capsJSON, &modelJSON, &t.Kind, &t.CreatedAt, &t.UpdatedAt); err != nil {
+	var triggersJSON, capsJSON, modelJSON, portsJSON []byte
+	if err := s.Scan(&t.ID, &t.UserID, &t.Name, &t.Description, &t.Status, &triggersJSON, &capsJSON, &modelJSON, &t.Kind, &portsJSON, &t.CreatedAt, &t.UpdatedAt); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal(triggersJSON, &t.Triggers)
 	_ = json.Unmarshal(capsJSON, &t.Capabilities)
 	_ = json.Unmarshal(modelJSON, &t.Model)
+	_ = json.Unmarshal(portsJSON, &t.Ports)
 	if t.Kind == "" {
 		t.Kind = "oneshot"
+	}
+	if t.Ports == nil {
+		t.Ports = []TaskPort{}
 	}
 	return &t, nil
 }

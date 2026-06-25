@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -22,6 +23,7 @@ import (
 	"github.com/nk/platform/api/internal/runner"
 	"github.com/nk/platform/api/internal/scheduler"
 	"github.com/nk/platform/api/internal/store"
+	"github.com/nk/platform/api/internal/verify"
 )
 
 func main() {
@@ -80,6 +82,94 @@ func main() {
 
 	h := handler.New(taskStore, bus, dispatch, files, gen, memStore, evoStore, evoEngine, credStore, oauthMgr)
 	h.Ports = ports
+	h.Node = nodeRunner
+	h.Verify = verify.New(envOr("PLATFORM_VERIFY_URL", "http://localhost:8083"))
+	h.Reflection = reflectClient
+
+	// Anything still marked "running" or "queued" at boot survived a process
+	// restart — it can't still be in flight, so cancel it. Cleans up the
+	// orphan run rows that otherwise stack up in the Runs tab forever.
+	if n, err := taskStore.SweepOrphanRuns(); err != nil {
+		log.Printf("orphan run sweep failed: %v", err)
+	} else if n > 0 {
+		log.Printf("orphan run sweep: cancelled %d stale rows", n)
+	}
+
+	// Phase 4: nightly skill-evolver. Looks at the user's accumulated memory
+	// + corrections and asks reflection to propose new skills, which the
+	// user reviews in Settings -> Skill proposals. Set tick to 30s for now
+	// so dev/test sees it fire; production should use 12h.
+	skillEvolveTick := 12 * time.Hour
+	if v := envOr("PLATFORM_SKILL_EVOLVE_TICK", ""); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			skillEvolveTick = d
+		}
+	}
+	evolver := runner.NewSkillEvolver(
+		reflectClient, memStore, taskStore, bus,
+		func(uid string) []reflection.ExistingSkill {
+			out := []reflection.ExistingSkill{}
+			dir := filepath.Join(getPromptsRoot(), "users", uid, "skills")
+			if entries, err := os.ReadDir(dir); err == nil {
+				for _, e := range entries {
+					if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+						continue
+					}
+					body, _ := os.ReadFile(filepath.Join(dir, e.Name()))
+					out = append(out, reflection.ExistingSkill{
+						Name: strings.TrimSuffix(e.Name(), ".md"),
+						Body: string(body),
+					})
+				}
+			}
+			return out
+		},
+		func(uid string, res *reflection.SkillProposeResult) {
+			_, _ = taskStore.CreateSkillProposal(&store.SkillProposal{
+				UserID:      uid,
+				SkillName:   res.SkillName,
+				SkillBody:   res.SkillBody,
+				Rationale:   res.Rationale,
+				Confidence:  res.Confidence,
+				AppliesWhen: res.AppliesWhen,
+			})
+		},
+		skillEvolveTick,
+	)
+	evolver.Start()
+	defer evolver.Stop()
+	h.SkillEvolver = evolver
+
+	// Daily memory pruner: non-pinned, never-read entries older than 90d get
+	// soft-archived so retrieval stays focused. Pinned entries never expire.
+	pruneStop := make(chan struct{})
+	go func() {
+		// Settle wait so the boot path doesn't immediately compete with
+		// migrations + supervisor warm-up.
+		time.Sleep(2 * time.Minute)
+		t := time.NewTicker(24 * time.Hour)
+		defer t.Stop()
+		runPrune := func() {
+			n, err := memStore.PruneStale(store.DefaultUserID, 90, 60, 0)
+			if err != nil {
+				log.Printf("memory prune failed: %v", err)
+				return
+			}
+			if n > 0 {
+				log.Printf("memory prune: archived %d stale entries", n)
+			}
+		}
+		runPrune()
+		for {
+			select {
+			case <-pruneStop:
+				return
+			case <-t.C:
+				runPrune()
+			}
+		}
+	}()
+	defer close(pruneStop)
 
 	sched := scheduler.NewCron(taskStore, dispatch)
 	sched.Start()
@@ -128,6 +218,33 @@ func main() {
 		r.Patch("/tasks/{id}/service", h.SetServiceEnabled)
 		r.Get("/tasks/{id}/service", h.ServiceStatus)
 
+		r.Get("/archive/tasks", h.ListArchivedTasks)
+		r.Get("/archive/tasks/{id}", h.GetArchivedTask)
+
+		r.Get("/tasks/{id}/verification", h.GetVerification)
+		r.Get("/tasks/{id}/verification/screenshot", h.GetVerificationScreenshot)
+		r.Get("/tasks/{id}/dryrun", h.GetDryRun)
+		r.Post("/tasks/{id}/dryrun", h.TriggerDryRun)
+		r.Get("/tasks/{id}/ports", h.ListTaskPorts)
+
+		r.Get("/profile", h.GetUserProfile)
+		r.Put("/profile", h.PutUserProfile)
+		r.Get("/profile/suggestions", h.ListProfileSuggestions)
+		r.Post("/profile/suggestions/{id}", h.ResolveProfileSuggestion)
+
+		r.Post("/skills/propose", h.ProposeSkill)
+		r.Post("/skills", h.AcceptSkill)
+		r.Get("/skills", h.ListUserSkills)
+		r.Delete("/skills/{name}", h.DeleteUserSkill)
+
+		r.Get("/skill-proposals", h.ListSkillProposals)
+		r.Post("/skill-proposals/{id}/accept", h.AcceptSkillProposal)
+		r.Post("/skill-proposals/{id}/reject", h.RejectSkillProposal)
+		r.Post("/skill-proposals/evolve", h.TriggerSkillEvolve)
+
+		r.Get("/memory/stats", h.MemoryStats)
+		r.Post("/memory/prune", h.PruneMemory)
+
 		r.Get("/runs/{id}", h.GetRun)
 		r.Post("/runs/{id}/cancel", h.CancelRun)
 		r.Get("/runs/{id}/stream", h.RunStream)
@@ -171,6 +288,14 @@ func main() {
 	if err := http.ListenAndServe(addr, r); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func getPromptsRoot() string {
+	if v := os.Getenv("PLATFORM_GENERATOR_PROMPTS_DIR"); v != "" {
+		return v
+	}
+	wd, _ := os.Getwd()
+	return filepath.Join(filepath.Dir(wd), "generator", "prompts")
 }
 
 func defaultWorkflowRoot() string {

@@ -37,16 +37,41 @@ type HistoryMessage struct {
 }
 
 type ExistingTask struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	Description   string    `json:"description"`
-	Kind          string    `json:"kind,omitempty"`
-	Capabilities  []string  `json:"capabilities"`
-	Triggers      []Trigger `json:"triggers"`
-	MainTs        string    `json:"mainTs,omitempty"`
-	LastRunState  string    `json:"lastRunState,omitempty"`
-	LastRunError  string    `json:"lastRunError,omitempty"`
-	RecentLogTail []string  `json:"recentLogTail,omitempty"`
+	ID               string                `json:"id"`
+	Name             string                `json:"name"`
+	Description      string                `json:"description"`
+	Kind             string                `json:"kind,omitempty"`
+	Capabilities     []string              `json:"capabilities"`
+	Triggers         []Trigger             `json:"triggers"`
+	MainTs           string                `json:"mainTs,omitempty"`
+	LastRunState     string                `json:"lastRunState,omitempty"`
+	LastRunError     string                `json:"lastRunError,omitempty"`
+	RecentLogTail    []string              `json:"recentLogTail,omitempty"`
+	LastVerification *VerificationSnapshot `json:"lastVerification,omitempty"`
+	LastDryRun       *DryRunSnapshot       `json:"lastDryRun,omitempty"`
+}
+
+// DryRunSnapshot mirrors runner.DryRunResult so the generator can see if the
+// last automated smoke-run with mocked connectors passed.
+type DryRunSnapshot struct {
+	OK         bool     `json:"ok"`
+	ExitCode   int      `json:"exitCode"`
+	FatalError string   `json:"fatalError,omitempty"`
+	Stderr     []string `json:"stderr,omitempty"`
+	DurationMs int      `json:"durationMs"`
+	TimedOut   bool     `json:"timedOut,omitempty"`
+}
+
+// VerificationSnapshot is what the most-recent browser probe saw. Mirrors
+// verify.BrowseResult but only the fields the generator can act on.
+type VerificationSnapshot struct {
+	OK            bool     `json:"ok"`
+	Errors        []string `json:"errors,omitempty"`
+	ConsoleErrors []string `json:"consoleErrors,omitempty"`
+	PageErrors    []string `json:"pageErrors,omitempty"`
+	Status        int      `json:"status,omitempty"`
+	TextChars     int      `json:"textChars,omitempty"`
+	DurationMs    int      `json:"durationMs,omitempty"`
 }
 
 type Request struct {
@@ -58,6 +83,18 @@ type Request struct {
 	ConnectorsAvailable []string         `json:"connectorsAvailable,omitempty"`
 	History             []HistoryMessage `json:"history,omitempty"`
 	ExistingTasks       []ExistingTask   `json:"existingTasks,omitempty"`
+	// Phase 1 self-tuning: retrieved user-scope memories the agent should
+	// consider this turn (preferences, recurring corrections, domain facts).
+	UserContext []MemoryHint `json:"userContext,omitempty"`
+	// Phase 2 self-tuning: stable user profile fields (preferred language,
+	// reply tone, expertise, hard rules) the agent should always honor.
+	UserProfile map[string]any `json:"userProfile,omitempty"`
+}
+
+type MemoryHint struct {
+	Topic   string `json:"topic"`
+	Content string `json:"content"`
+	Pinned  bool   `json:"pinned,omitempty"`
 }
 
 type Intent string
@@ -91,6 +128,13 @@ type CredentialRequest struct {
 }
 
 // Outcome captures every branch the generator can return.
+// Port mirrors store.TaskPort so the generator client doesn't need to import
+// the store package directly.
+type Port struct {
+	Name string `json:"name"`
+	Role string `json:"role"`
+}
+
 type Outcome struct {
 	Intent        Intent
 	Reply         string
@@ -104,6 +148,7 @@ type Outcome struct {
 	Capabilities []string
 	Triggers     []Trigger
 	Files        map[string]string
+	Ports        []Port
 
 	// For request_credential
 	CredentialRequest *CredentialRequest
@@ -116,7 +161,11 @@ type envelope struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-func (c *Client) Generate(ctx context.Context, req Request) (*Outcome, error) {
+// ProgressFn is called for every non-terminal SSE event the generator emits
+// (stream deltas, harness turn announcements). Pass nil to ignore them.
+type ProgressFn func(channel string, payload json.RawMessage)
+
+func (c *Client) Generate(ctx context.Context, req Request, onProgress ProgressFn) (*Outcome, error) {
 	if c.BaseURL == "" {
 		return nil, errors.New("generator base URL not configured")
 	}
@@ -163,6 +212,7 @@ func (c *Client) Generate(ctx context.Context, req Request) (*Outcome, error) {
 				Capabilities []string          `json:"capabilities"`
 				Triggers     []Trigger         `json:"triggers"`
 				Files        map[string]string `json:"files"`
+				Ports        []Port            `json:"ports"`
 				Reply        string            `json:"reply"`
 			}
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
@@ -172,6 +222,7 @@ func (c *Client) Generate(ctx context.Context, req Request) (*Outcome, error) {
 				Intent: IntentCreate, Reply: p.Reply,
 				Name: p.Name, Description: p.Description, Kind: p.Kind,
 				Capabilities: p.Capabilities, Triggers: p.Triggers, Files: p.Files,
+				Ports: p.Ports,
 			}, nil
 		case "workflow:update":
 			var p struct {
@@ -182,6 +233,7 @@ func (c *Client) Generate(ctx context.Context, req Request) (*Outcome, error) {
 				Capabilities []string          `json:"capabilities"`
 				Triggers     []Trigger         `json:"triggers"`
 				Files        map[string]string `json:"files"`
+				Ports        []Port            `json:"ports"`
 				Reply        string            `json:"reply"`
 			}
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
@@ -191,6 +243,7 @@ func (c *Client) Generate(ctx context.Context, req Request) (*Outcome, error) {
 				Intent: IntentUpdate, Reply: p.Reply, TargetTaskID: p.TargetTaskID,
 				Name: p.Name, Description: p.Description, Kind: p.Kind,
 				Capabilities: p.Capabilities, Triggers: p.Triggers, Files: p.Files,
+				Ports: p.Ports,
 			}, nil
 		case "workflow:chat":
 			var p struct {
@@ -246,6 +299,10 @@ func (c *Client) Generate(ctx context.Context, req Request) (*Outcome, error) {
 			}
 			_ = json.Unmarshal(env.Payload, &p)
 			return nil, fmt.Errorf("generator error: %s", p.Message)
+		default:
+			if onProgress != nil {
+				onProgress(env.Channel, env.Payload)
+			}
 		}
 	}
 	if err := scan.Err(); err != nil {

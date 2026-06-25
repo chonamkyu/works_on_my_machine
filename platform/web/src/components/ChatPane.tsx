@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { Sparkles, KeyRound, ExternalLink } from "lucide-react";
-import { api } from "../lib/api";
+import { Sparkles, KeyRound, ChevronsRight } from "lucide-react";
+import { api, subscribe, type SSEMessage } from "../lib/api";
+
+const USER_ID = "u_local";
 
 interface CredentialRequest {
   connector: string;
@@ -23,20 +25,48 @@ export function ChatPane({
   taskName,
   taskId,
   taskKind,
-  onOpenDetail,
+  paneOpen,
+  onExpandPane,
+  onRenameTask,
   onTaskCreated,
 }: {
   sessionId: string;
   taskName?: string;
   taskId?: string;
   taskKind?: string;
-  onOpenDetail?: () => void;
+  paneOpen?: boolean;
+  onExpandPane?: () => void;
+  onRenameTask?: (name: string) => Promise<void>;
   onTaskCreated: (newId?: string) => Promise<void>;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [pending, setPending] = useState(false);
+  const [streamPreview, setStreamPreview] = useState("");
+  const [progressSteps, setProgressSteps] = useState<string[]>([]);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [now, setNow] = useState<number>(() => Date.now());
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Tick a clock while a turn is in flight so the user can see elapsed time.
+  useEffect(() => {
+    if (!pending) return;
+    const id = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(id);
+  }, [pending]);
+
+  // When the user switches sessions, clear all turn-in-flight state so the
+  // new chat doesn't inherit the previous session's "agent drafting" badge,
+  // streamed preview, or progress steps. Any in-flight fetch from the old
+  // session resolves into the void (its setState is ignored after this
+  // effect runs since `pending` is already false for the new mount).
+  useEffect(() => {
+    setPending(false);
+    setStreamPreview("");
+    setProgressSteps([]);
+    setStartedAt(null);
+    setInput("");
+  }, [sessionId]);
 
   // Load history whenever the active session switches.
   useEffect(() => {
@@ -70,13 +100,46 @@ export function ChatPane({
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [messages]);
+  }, [messages, streamPreview]);
+
+  // While a generation is in flight, surface every progress event the
+  // generator emits — harness turn announcements (extract-intent, etc.)
+  // arrive almost instantly so the user gets feedback before the LLM
+  // produces its first token, and raw stream deltas accumulate into a
+  // live preview of the response.
+  useEffect(() => {
+    if (!pending) return;
+    const stop = subscribe(`/v1/users/${USER_ID}/activity`, (msg: SSEMessage) => {
+      if (msg.channel !== `chat:progress:${sessionId}`) return;
+      const payload = msg.payload as { channel?: string; data?: unknown };
+      const inner = payload?.data as
+        | { delta?: string; name?: string; status?: string; intent?: string; mode?: string; error?: string }
+        | undefined;
+      if (payload.channel === "workflow:stream_delta" && typeof inner?.delta === "string") {
+        setStreamPreview((s) => s + inner.delta);
+        return;
+      }
+      if (payload.channel === "harness:turn" && inner?.name) {
+        const tag =
+          inner.status === "ok" ? "✓" :
+          inner.status === "retry" ? "↻" :
+          inner.status === "failed" ? "✕" : "◐";
+        const extra = inner.intent ? ` (${inner.intent})` : inner.mode ? ` [${inner.mode}]` : "";
+        setProgressSteps((s) => [...s, `${tag} ${inner.name}${extra}`]);
+      }
+    });
+    return stop;
+  }, [pending, sessionId]);
 
   const send = async (override?: string) => {
     const content = (override ?? input).trim();
     if (!content || pending) return;
     if (!override) setInput("");
     setMessages((m) => [...m, { role: "user", content }]);
+    setStreamPreview("");
+    setProgressSteps([]);
+    setStartedAt(Date.now());
+    setNow(Date.now());
     setPending(true);
     try {
       const reply = await api.chat(sessionId, content);
@@ -101,6 +164,9 @@ export function ChatPane({
       ]);
     } finally {
       setPending(false);
+      setStreamPreview("");
+      setProgressSteps([]);
+      setStartedAt(null);
     }
   };
 
@@ -113,49 +179,69 @@ export function ChatPane({
 
   return (
     <main className="flex-1 flex flex-col min-w-0">
-      <div className="h-10 border-b border-surface-700 px-4 flex items-center gap-3 text-text-muted">
-        <span className="font-mono text-xs">{taskName ?? "task"}</span>
-        <span className="font-mono text-[10px] text-text-dim">{sessionId}</span>
+      <div className="h-11 border-b border-hairline px-5 flex items-center gap-3">
+        <EditableName name={taskName ?? "task"} onRename={onRenameTask} />
+        <span className="font-mono text-[10px] text-ink-tertiary">{sessionId}</span>
         <div className="flex-1" />
-        {taskKind === "service" && taskId && (
-          <a
-            href={`/d/${taskId}/`}
-            target="_blank"
-            rel="noreferrer"
-            className="h-7 px-2 rounded border border-brand-600 hover:bg-brand-600/10 text-xs font-mono text-brand-600 flex items-center gap-1"
-            data-testid="chat-open-dashboard"
-          >
-            dashboard <ExternalLink className="w-3 h-3" />
-          </a>
-        )}
-        {onOpenDetail && (
+        {!paneOpen && onExpandPane && (
           <button
-            onClick={onOpenDetail}
-            className="h-7 px-2 rounded border border-surface-700 hover:border-brand-600 text-xs font-mono"
+            onClick={onExpandPane}
+            className="w-7 h-7 rounded-md text-ink-subtle hover:text-ink hover:bg-surface-2 flex items-center justify-center"
+            title="Expand panel · ⌘."
+            aria-label="Expand panel"
+            data-testid="chat-expand-pane"
           >
-            details
+            <ChevronsRight className="w-3.5 h-3.5" />
           </button>
         )}
       </div>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
         {messages.length === 0 && !pending && (
-          <p className="text-xs text-text-dim">empty session — say something to start.</p>
+          <p className="text-xs text-ink-tertiary">empty session — say something to start.</p>
         )}
         {messages.map((m, i) => (
           <Bubble key={i} msg={m} onCredentialSaved={onCredentialSaved} />
         ))}
         {pending && (
-          <div className="text-xs text-text-muted flex items-center gap-2">
-            <span className="animate-pulse">◐</span> generator running…
+          <div>
+            <div className="font-mono text-[10px] uppercase tracking-wider text-ink-subtle mb-1 flex items-center gap-2">
+              <span className="animate-pulse">◐</span> agent drafting
+              {startedAt && (
+                <span className="font-mono normal-case tracking-normal text-ink-tertiary">
+                  · {((now - startedAt) / 1000).toFixed(1)}s
+                </span>
+              )}
+              {streamPreview && (
+                <span className="font-mono normal-case tracking-normal text-ink-tertiary">
+                  · {streamPreview.length} chars
+                </span>
+              )}
+            </div>
+            {progressSteps.length > 0 && (
+              <ul className="mb-1 font-mono text-[11px] text-ink-tertiary space-y-0.5">
+                {progressSteps.map((s, i) => (
+                  <li key={i}>{s}</li>
+                ))}
+              </ul>
+            )}
+            {streamPreview ? (
+              <pre className="text-[11px] text-ink-tertiary whitespace-pre-wrap font-mono leading-relaxed bg-canvas/60 border border-surface-800 rounded p-2 max-h-72 overflow-y-auto">
+                {streamPreview.slice(-2000)}
+              </pre>
+            ) : (
+              <p className="text-xs text-ink-tertiary">
+                {progressSteps.length > 0 ? "model thinking… first token usually arrives in 3–15s" : "waiting for first tokens…"}
+              </p>
+            )}
           </div>
         )}
       </div>
 
-      <div className="border-t border-surface-700 p-3">
-        <div className="flex items-end gap-2 bg-surface-850 border border-surface-700 rounded-md p-2">
+      <div className="border-t border-hairline p-3">
+        <div className="flex items-end gap-2 bg-surface-3 border border-hairline rounded-md p-2">
           <textarea
-            className="flex-1 bg-transparent outline-none resize-none text-sm placeholder:text-text-dim"
+            className="flex-1 bg-transparent outline-none resize-none text-sm placeholder:text-ink-tertiary"
             placeholder="ask the agent — '@task:' to mention, '/model' to switch"
             rows={2}
             value={input}
@@ -169,9 +255,191 @@ export function ChatPane({
             data-testid="chat-input"
           />
         </div>
-        <p className="mt-1 px-1 text-[11px] text-text-dim font-mono">Enter to send · Shift+Enter for newline</p>
+        <p className="mt-1 px-1 text-[11px] text-ink-tertiary font-mono">Enter to send · Shift+Enter for newline</p>
       </div>
     </main>
+  );
+}
+
+// Splits a chat message into code fences and prose. Code fences use
+// ```lang\n...\n``` with optional lang; inline `code` is rendered with a
+// monospace chip. No external markdown dep — chat replies are short and the
+// agent's output sticks to fences + inline code.
+function MessageBody({ text }: { text: string }) {
+  const parts: Array<{ type: "code"; lang: string; body: string } | { type: "prose"; body: string }> = [];
+  const re = /```([\w-]*)\n([\s\S]*?)```/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) parts.push({ type: "prose", body: text.slice(last, m.index) });
+    parts.push({ type: "code", lang: m[1] || "", body: m[2].replace(/\n$/, "") });
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push({ type: "prose", body: text.slice(last) });
+  // unterminated trailing fence (still streaming) — show as code so the live
+  // delta doesn't flash as raw markdown
+  const trail = parts[parts.length - 1];
+  if (trail && trail.type === "prose") {
+    const open = trail.body.lastIndexOf("```");
+    if (open !== -1 && trail.body.slice(open).indexOf("\n") !== -1) {
+      const head = trail.body.slice(0, open);
+      const rest = trail.body.slice(open + 3);
+      const nl = rest.indexOf("\n");
+      const lang = nl >= 0 ? rest.slice(0, nl) : "";
+      const body = nl >= 0 ? rest.slice(nl + 1) : "";
+      parts.pop();
+      if (head) parts.push({ type: "prose", body: head });
+      parts.push({ type: "code", lang, body });
+    }
+  }
+
+  return (
+    <div className="text-sm text-ink space-y-2">
+      {parts.map((p, i) =>
+        p.type === "code" ? (
+          <CodeBlock key={i} lang={p.lang} body={p.body} />
+        ) : (
+          <Prose key={i} text={p.body} />
+        ),
+      )}
+    </div>
+  );
+}
+
+function Prose({ text }: { text: string }) {
+  // Inline `code` only — keep prose otherwise plain. Splits on backtick pairs.
+  const pieces: Array<{ kind: "code" | "text"; v: string }> = [];
+  let buf = "";
+  let inCode = false;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "`") {
+      pieces.push({ kind: inCode ? "code" : "text", v: buf });
+      buf = "";
+      inCode = !inCode;
+    } else {
+      buf += text[i];
+    }
+  }
+  if (buf) pieces.push({ kind: inCode ? "code" : "text", v: buf });
+  return (
+    <p className="whitespace-pre-wrap leading-relaxed">
+      {pieces.map((p, i) =>
+        p.kind === "code" ? (
+          <code
+            key={i}
+            className="font-mono text-[12px] px-1 py-0.5 rounded bg-surface-3 border border-hairline text-accent-hover"
+          >
+            {p.v}
+          </code>
+        ) : (
+          <span key={i}>{p.v}</span>
+        ),
+      )}
+    </p>
+  );
+}
+
+function CodeBlock({ lang, body }: { lang: string; body: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="rounded-md border border-hairline bg-canvas/70 overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-1.5 border-b border-hairline bg-canvas/80">
+        <span className="font-mono text-[10px] uppercase tracking-wider text-ink-subtle">
+          {lang || "code"}
+        </span>
+        <button
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(body);
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1200);
+            } catch {
+              /* clipboard blocked — ignore */
+            }
+          }}
+          className="font-mono text-[10px] text-ink-subtle hover:text-ink"
+        >
+          {copied ? "copied" : "copy"}
+        </button>
+      </div>
+      <pre className="px-3 py-2 overflow-x-auto text-[12px] leading-relaxed font-mono text-ink">
+        <code>{body}</code>
+      </pre>
+    </div>
+  );
+}
+
+/**
+ * Inline-editable task name. Click to switch to a textarea-less input; Enter
+ * to save, Esc to cancel, blur acts like Enter. Empty / unchanged names are
+ * ignored so the user can't accidentally wipe the name out.
+ */
+function EditableName({
+  name,
+  onRename,
+}: {
+  name: string;
+  onRename?: (next: string) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(name);
+  const ref = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setDraft(name);
+  }, [name]);
+  useEffect(() => {
+    if (editing) ref.current?.select();
+  }, [editing]);
+
+  if (!editing || !onRename) {
+    return (
+      <button
+        onClick={() => onRename && setEditing(true)}
+        className="text-[15px] font-medium text-ink tracking-tight hover:text-accent-hover focus:text-accent-hover transition-colors text-left"
+        title={onRename ? "Click to rename" : undefined}
+        disabled={!onRename}
+      >
+        {name}
+      </button>
+    );
+  }
+
+  const commit = async () => {
+    const next = draft.trim();
+    if (next && next !== name && onRename) {
+      try {
+        await onRename(next);
+      } catch (e) {
+        console.warn("rename failed", e);
+      }
+    }
+    setEditing(false);
+  };
+  const cancel = () => {
+    setDraft(name);
+    setEditing(false);
+  };
+
+  return (
+    <input
+      ref={ref}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          void commit();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          cancel();
+        }
+      }}
+      onBlur={() => void commit()}
+      spellCheck={false}
+      className="text-[15px] font-medium text-ink tracking-tight bg-surface-2 border border-accent rounded px-2 py-0.5 outline-none"
+      style={{ outline: "none", minWidth: "12ch" }}
+    />
   );
 }
 
@@ -184,13 +452,13 @@ function Bubble({
 }) {
   return (
     <div>
-      <div className="font-mono text-[10px] uppercase tracking-wider text-text-muted mb-1">
+      <div className="font-mono text-[10px] uppercase tracking-wider text-ink-subtle mb-1">
         {msg.role === "user" ? "you" : "agent"}
       </div>
-      <div className="text-sm text-text-primary whitespace-pre-wrap">{msg.content}</div>
+      <MessageBody text={msg.content} />
       {msg.createdTaskName && (
-        <div className="mt-2 border border-brand-600/30 rounded-md p-2 bg-surface-850 text-xs">
-          <div className="flex items-center gap-2 text-brand-400">
+        <div className="mt-2 border border-accent/30 rounded-md p-2 bg-surface-3 text-xs">
+          <div className="flex items-center gap-2 text-accent-hover">
             <Sparkles className="w-3 h-3" />
             <span>Created task: {msg.createdTaskName}</span>
           </div>
@@ -216,7 +484,7 @@ function CredentialPrompt({
 
   if (done) {
     return (
-      <div className="mt-2 border border-status-running/40 rounded-md p-2 bg-surface-850 text-xs text-status-running">
+      <div className="mt-2 border border-status-running/40 rounded-md p-2 bg-surface-3 text-xs text-status-running">
         ✓ {req.connector} credential saved.
       </div>
     );
@@ -224,12 +492,12 @@ function CredentialPrompt({
 
   if (req.kind === "oauth") {
     return (
-      <div className="mt-2 border border-brand-600/30 rounded-md p-3 bg-surface-850 text-xs space-y-2">
+      <div className="mt-2 border border-accent/30 rounded-md p-3 bg-surface-3 text-xs space-y-2">
         <div className="flex items-center gap-2">
-          <KeyRound className="w-3.5 h-3.5 text-brand-400" />
-          <span className="text-text-primary font-medium">Connect {req.connector}</span>
+          <KeyRound className="w-3.5 h-3.5 text-accent-hover" />
+          <span className="text-ink font-medium">Connect {req.connector}</span>
         </div>
-        {req.instructions && <p className="text-text-secondary">{req.instructions}</p>}
+        {req.instructions && <p className="text-ink-muted">{req.instructions}</p>}
         <button
           onClick={async () => {
             setBusy(true);
@@ -243,7 +511,7 @@ function CredentialPrompt({
             }
           }}
           disabled={busy}
-          className="h-7 px-3 rounded bg-brand-600 text-white disabled:opacity-50"
+          className="h-7 px-3 rounded bg-accent text-white disabled:opacity-50"
         >
           {busy ? "opening…" : `Connect with ${req.connector}`}
         </button>
@@ -252,10 +520,10 @@ function CredentialPrompt({
   }
 
   return (
-    <div className="mt-2 border border-brand-600/30 rounded-md p-3 bg-surface-850 text-xs space-y-2">
+    <div className="mt-2 border border-accent/30 rounded-md p-3 bg-surface-3 text-xs space-y-2">
       <div className="flex items-center gap-2">
-        <KeyRound className="w-3.5 h-3.5 text-brand-400" />
-        <span className="text-text-primary font-medium">
+        <KeyRound className="w-3.5 h-3.5 text-accent-hover" />
+        <span className="text-ink font-medium">
           Register {req.connector} credential
         </span>
         {req.helpUrl && (
@@ -263,13 +531,13 @@ function CredentialPrompt({
             href={req.helpUrl}
             target="_blank"
             rel="noreferrer"
-            className="text-text-muted hover:text-brand-400 underline"
+            className="text-ink-subtle hover:text-accent-hover underline"
           >
             issue key →
           </a>
         )}
       </div>
-      {req.instructions && <p className="text-text-secondary">{req.instructions}</p>}
+      {req.instructions && <p className="text-ink-muted">{req.instructions}</p>}
       <div className="flex items-center gap-2">
         <input
           type="password"
@@ -277,7 +545,7 @@ function CredentialPrompt({
           value={secret}
           onChange={(e) => setSecret(e.target.value)}
           placeholder="paste the key here"
-          className="flex-1 bg-surface-900 border border-surface-700 rounded px-2 h-7 text-sm placeholder:text-text-dim"
+          className="flex-1 bg-surface-1 border border-hairline rounded px-2 h-7 text-sm placeholder:text-ink-tertiary"
           data-testid={`credential-input-${req.connector}`}
         />
         <button
@@ -298,7 +566,7 @@ function CredentialPrompt({
             }
           }}
           disabled={!secret || busy}
-          className="h-7 px-3 rounded bg-brand-600 text-white text-xs disabled:opacity-50"
+          className="h-7 px-3 rounded bg-accent text-white text-xs disabled:opacity-50"
           data-testid={`credential-save-${req.connector}`}
         >
           {busy ? "saving…" : "Save & continue"}

@@ -117,14 +117,29 @@ func (sm *ServiceManager) reconcile() {
 		}
 		log.Printf("service: starting %s (%s)", id, t.Name)
 		ctx, cancel := context.WithCancel(context.Background())
-		sm.running[id] = &serviceProc{cancel: cancel, taskID: id}
-		go sm.supervise(ctx, t)
+		proc := &serviceProc{cancel: cancel, taskID: id}
+		sm.running[id] = proc
+		go sm.supervise(ctx, proc, t)
 	}
 }
 
 // supervise restarts the workflow with exponential backoff (capped at 30s)
 // for as long as the manager wants it to run.
-func (sm *ServiceManager) supervise(ctx context.Context, task *store.Task) {
+func (sm *ServiceManager) supervise(ctx context.Context, self *serviceProc, task *store.Task) {
+	defer func() {
+		// On exit (cancel, task removed, or kind change) clear our slot so the
+		// reconcile loop can spawn a fresh supervisor with new code/ports.
+		// Compare pointers so we don't accidentally evict a successor that
+		// reconcile already swapped in.
+		sm.mu.Lock()
+		if cur, ok := sm.running[task.ID]; ok && cur == self {
+			delete(sm.running, task.ID)
+		}
+		sm.mu.Unlock()
+		if sm.ports != nil {
+			sm.ports.Release(task.ID)
+		}
+	}()
 	backoff := time.Second
 	for {
 		select {

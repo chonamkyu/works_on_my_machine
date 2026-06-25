@@ -44,8 +44,28 @@ type Task struct {
 	Capabilities []string    `json:"capabilities"`
 	Model        ModelConfig `json:"model"`
 	Kind         string      `json:"kind"` // "oneshot" (default) | "service"
-	CreatedAt    time.Time   `json:"createdAt"`
-	UpdatedAt    time.Time   `json:"updatedAt"`
+	// Ports declared by the agent for kind=service tasks. The platform
+	// allocates a loopback port per entry and exposes them at
+	// /d/<task>/<name>/. Exactly one entry should have role="ui" — that's
+	// the iframe default.
+	Ports     []TaskPort `json:"ports"`
+	CreatedAt time.Time  `json:"createdAt"`
+	UpdatedAt time.Time  `json:"updatedAt"`
+}
+
+// TaskPort is one declared HTTP surface for a service task.
+type TaskPort struct {
+	// Name is a kebab-case slug used in the proxy URL (/d/<task>/<name>/).
+	Name string `json:"name"`
+	// Role hints how this port is used:
+	//   "ui"    — primary user-facing UI. Exactly one task should have this.
+	//             /d/<task>/ defaults to this port.
+	//   "api"   — JSON / Swagger surface, programmatic use.
+	//   "other" — websocket, SSE, debug endpoint, etc.
+	Role string `json:"role"`
+	// Allocated is the loopback port the platform bound for this entry.
+	// Stored at runtime; not authored by the agent.
+	Allocated int `json:"allocated,omitempty"`
 }
 
 type Run struct {

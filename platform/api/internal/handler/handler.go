@@ -15,7 +15,10 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -23,8 +26,10 @@ import (
 	"github.com/nk/platform/api/internal/generator"
 	"github.com/nk/platform/api/internal/oauth"
 	"github.com/nk/platform/api/internal/portreg"
+	"github.com/nk/platform/api/internal/reflection"
 	"github.com/nk/platform/api/internal/runner"
 	"github.com/nk/platform/api/internal/store"
+	"github.com/nk/platform/api/internal/verify"
 )
 
 type Handler struct {
@@ -38,8 +43,20 @@ type Handler struct {
 	Engine      *runner.EvolutionEngine
 	Credentials *store.CredentialStore
 	OAuth       *oauth.Manager
-	Services    *runner.ServiceManager
-	Ports       *portreg.Registry
+	Services     *runner.ServiceManager
+	Ports        *portreg.Registry
+	Verify       *verify.Client
+	Reflection   *reflection.Client
+	SkillEvolver *runner.SkillEvolver
+
+	verifMu     sync.Mutex
+	verifByTask map[string]*verify.BrowseResult
+
+	dryMu     sync.Mutex
+	dryByTask map[string]*runner.DryRunResult
+
+	// NodeRunner exposed for direct dry-run calls (RunDry).
+	Node *runner.NodeRunner
 }
 
 func New(
@@ -65,7 +82,645 @@ func New(
 		Engine:      engine,
 		Credentials: creds,
 		OAuth:       oauthMgr,
+		verifByTask: map[string]*verify.BrowseResult{},
+		dryByTask:   map[string]*runner.DryRunResult{},
 	}
+}
+
+// scheduleDryRun spawns the workflow with PLATFORM_DRY_RUN=1 right after
+// files are written so generator hallucinations surface within seconds
+// instead of at first real run. Result is stored per-task and injected into
+// the next chat turn's generator context.
+func (h *Handler) scheduleDryRun(taskID, sessionID string) {
+	if h.Node == nil {
+		return
+	}
+	go func() {
+		t, err := h.Store.GetTask(taskID)
+		if err != nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		res := h.Node.RunDry(ctx, t, 20*time.Second)
+		h.dryMu.Lock()
+		h.dryByTask[taskID] = &res
+		h.dryMu.Unlock()
+		h.Bus.Publish(store.Event{
+			Channel: "chat:progress:" + sessionID,
+			UserID:  store.DefaultUserID,
+			Payload: map[string]any{"channel": "workflow:dryrun", "data": res},
+		})
+		if res.OK {
+			log.Printf("dry-run %s: ok in %dms", taskID, res.DurationMs)
+		} else {
+			log.Printf("dry-run %s: FAILED %s (exit=%d timedOut=%v)", taskID, res.FatalError, res.ExitCode, res.TimedOut)
+		}
+	}()
+}
+
+func (h *Handler) lastDryRun(taskID string) *runner.DryRunResult {
+	h.dryMu.Lock()
+	defer h.dryMu.Unlock()
+	return h.dryByTask[taskID]
+}
+
+func (h *Handler) GetDryRun(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	v := h.lastDryRun(id)
+	if v == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no dry-run yet"})
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+// TriggerDryRun runs a dry-run synchronously and returns the result. Useful
+// for the "Verify code" admin button and for tests.
+func (h *Handler) TriggerDryRun(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if h.Node == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "node runner not wired"})
+		return
+	}
+	t, err := h.Store.GetTask(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "task not found"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	res := h.Node.RunDry(ctx, t, 20*time.Second)
+	h.dryMu.Lock()
+	h.dryByTask[id] = &res
+	h.dryMu.Unlock()
+	writeJSON(w, http.StatusOK, res)
+}
+
+// scheduleVerification spawns an async browser probe of the dashboard for a
+// kind=service task. We wait up to ~20s for the supervisor to start the
+// daemon and bind a port, then call the verify service. The result is stored
+// in memory (latest per task) and published on chat:progress so the UI shows
+// status; on the next chat turn the generator sees it via the task summary.
+func (h *Handler) scheduleVerification(taskID, sessionID string) {
+	if h.Verify == nil {
+		return
+	}
+	go func() {
+		// Wait for the port to be allocated by the supervisor (≤ ~10s).
+		var port int
+		for i := 0; i < 30; i++ {
+			if h.Ports != nil {
+				if p, ok := h.Ports.Lookup(taskID); ok {
+					port = p
+					break
+				}
+			}
+			time.Sleep(400 * time.Millisecond)
+		}
+		if port == 0 {
+			log.Printf("verify: no port allocated for %s within timeout", taskID)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		url := fmt.Sprintf("http://127.0.0.1:%d/", port)
+		res, err := h.Verify.Browse(ctx, url, taskID, 15)
+		if err != nil {
+			log.Printf("verify call failed for %s: %v", taskID, err)
+			return
+		}
+		h.verifMu.Lock()
+		h.verifByTask[taskID] = res
+		h.verifMu.Unlock()
+		h.Bus.Publish(store.Event{
+			Channel: "chat:progress:" + sessionID,
+			UserID:  store.DefaultUserID,
+			Payload: map[string]any{"channel": "workflow:verify", "data": res},
+		})
+		log.Printf("verify %s: ok=%v errors=%v", taskID, res.OK, res.Errors)
+	}()
+}
+
+// lastVerification returns the most recent browser verification result for a
+// task (nil if none yet).
+func (h *Handler) lastVerification(taskID string) *verify.BrowseResult {
+	h.verifMu.Lock()
+	defer h.verifMu.Unlock()
+	return h.verifByTask[taskID]
+}
+
+// gatherUserContext retrieves the top-K user-scope memories relevant to the
+// current chat turn. Pinned memories are always surfaced first; the rest fill
+// up to `topK` slots via the memory store's hybrid vector+lexical search.
+func (h *Handler) gatherUserContext(userID, query string, history []generator.HistoryMessage) []*store.MemoryEntry {
+	if h.Memory == nil {
+		return nil
+	}
+	const topK = 8
+	// Combine the latest message with the previous user message so retrieval
+	// sees a tiny bit of conversational context. Strict cap so we don't pass
+	// 10KB+ histories into the embedding call.
+	q := query
+	for i := len(history) - 1; i >= 0 && len(q) < 600; i-- {
+		if history[i].Role == "user" {
+			q = history[i].Content + "\n" + q
+			break
+		}
+	}
+	results := h.Memory.Search(userID, q, topK)
+
+	// Always include any pinned memory the user explicitly anchored, even if
+	// it didn't match the query — those represent hard rules.
+	pinned := []*store.MemoryEntry{}
+	for _, m := range h.Memory.List(userID, store.ScopeUser, "") {
+		if m.Pinned {
+			pinned = append(pinned, m)
+		}
+	}
+	seen := map[string]bool{}
+	merged := make([]*store.MemoryEntry, 0, topK)
+	for _, m := range pinned {
+		if !seen[m.ID] {
+			merged = append(merged, m)
+			seen[m.ID] = true
+		}
+	}
+	for _, m := range results {
+		if len(merged) >= topK {
+			break
+		}
+		if !seen[m.ID] {
+			merged = append(merged, m)
+			seen[m.ID] = true
+		}
+	}
+	// Utility tracking — bump read_count + last_read_at so future pruning can
+	// distinguish actually-useful memories from dead weight.
+	if len(merged) > 0 && h.Store != nil {
+		ids := make([]string, 0, len(merged))
+		for _, m := range merged {
+			ids = append(ids, m.ID)
+		}
+		go h.Store.NoteMemoryRead(ids)
+	}
+	return merged
+}
+
+// looksLikeCorrection heuristically flags a user message as pushing back on
+// the previous agent reply. Used as a hint for the chat reflector.
+func looksLikeCorrection(text string) bool {
+	if text == "" {
+		return false
+	}
+	low := strings.ToLower(text)
+	for _, m := range []string{
+		"아니", "그게 아니", "다시", "잘못", "틀렸",
+		"no, ", "no.", "nope", "that's not", "wrong",
+		"don't ", "stop ", "again", "redo",
+	} {
+		if strings.HasPrefix(low, m) || strings.Contains(low, " "+m) {
+			return true
+		}
+	}
+	return false
+}
+
+// scheduleChatReflection fires the per-turn chat reflector in the background.
+// The result becomes user-scope memory + (later) profile suggestions. Failures
+// are non-fatal — the user already got their reply.
+func (h *Handler) scheduleChatReflection(userMsg, agentReply, sessionID, userID string, history []generator.HistoryMessage, known []*store.MemoryEntry) {
+	if h.Reflection == nil || h.Reflection.BaseURL == "" || h.Memory == nil {
+		return
+	}
+	if strings.TrimSpace(userMsg) == "" || strings.TrimSpace(agentReply) == "" {
+		return
+	}
+	// Snapshot inputs so the goroutine doesn't race with later mutations.
+	historyCopy := append([]generator.HistoryMessage(nil), history...)
+	knownSnips := make([]reflection.MemorySnippet, 0, len(known))
+	for _, m := range known {
+		knownSnips = append(knownSnips, reflection.MemorySnippet{Topic: m.Topic, Content: m.Content})
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		recent := make([]reflection.ChatTurn, 0, len(historyCopy))
+		for _, m := range historyCopy {
+			recent = append(recent, reflection.ChatTurn{Role: m.Role, Content: m.Content})
+		}
+		res, err := h.Reflection.ReflectChat(ctx, reflection.ChatReflectRequest{
+			UserID:       userID,
+			SessionID:    sessionID,
+			UserMessage:  userMsg,
+			AgentReply:   agentReply,
+			IsCorrection: looksLikeCorrection(userMsg),
+			RecentTurns:  recent,
+			KnownMemory:  knownSnips,
+		})
+		if err != nil {
+			log.Printf("chat reflection failed: %v", err)
+			return
+		}
+		written := 0
+		for _, upd := range res.MemoryUpdates {
+			entry := h.Memory.Write(&store.MemoryEntry{
+				UserID:  userID,
+				Scope:   store.ScopeUser,
+				Topic:   upd.Topic,
+				Content: upd.Content,
+				Pinned:  upd.Pinned,
+			})
+			written++
+			h.Bus.Publish(store.Event{
+				Channel: "memory:written:" + userID,
+				UserID:  userID,
+				Payload: map[string]any{"entry": entry, "source": "chat-reflect", "signal": res.Signal},
+			})
+		}
+		// Phase 2: profile suggestions become a row in user_profile_suggestions
+		// for the user to accept/reject. We persist but don't auto-apply.
+		if h.Store != nil {
+			for k, v := range res.ProfileSuggestions {
+				_ = h.Store.AppendProfileSuggestion(userID, k, v, sessionID)
+			}
+		}
+		log.Printf("chat reflection: session=%s signal=%s memories=%d", sessionID, res.Signal, written)
+	}()
+}
+
+// --- Phase 3: skill proposal + per-user overlay ---
+
+// ProposeSkill asks the reflection service to look at the user's accumulated
+// memories + recent corrections and propose a NEW skill file. The user
+// reviews and (if accepted) the file is dropped into the per-user overlay
+// so the generator loads it from then on.
+func (h *Handler) ProposeSkill(w http.ResponseWriter, r *http.Request) {
+	if h.Reflection == nil || h.Memory == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "reflection or memory not wired"})
+		return
+	}
+	userID := store.DefaultUserID
+	mems := h.Memory.List(userID, store.ScopeUser, "")
+	memMeta := make([]reflection.MemoryWithMeta, 0, len(mems))
+	for _, m := range mems {
+		memMeta = append(memMeta, reflection.MemoryWithMeta{Topic: m.Topic, Content: m.Content, Pinned: m.Pinned})
+	}
+	// Recent corrections from suggestions (which are downstream of corrections).
+	corrections := []string{}
+	for _, s := range h.Store.ListProfileSuggestions(userID, "pending") {
+		corrections = append(corrections, fmt.Sprintf("%s -> %s", s.Field, s.Value))
+	}
+	existing := loadOverlaySkills(userID)
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	res, err := h.Reflection.ProposeSkill(ctx, reflection.SkillProposeRequest{
+		UserID:            userID,
+		Memories:          memMeta,
+		RecentCorrections: corrections,
+		ExistingSkills:    existing,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	if res.Confidence == "low" || strings.TrimSpace(res.SkillBody) == "" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"skipped":    true,
+			"confidence": res.Confidence,
+			"rationale":  res.Rationale,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// AcceptSkill writes the proposed skill into the per-user overlay directory.
+// The next /generate call will pick it up via the hot-reload loader.
+func (h *Handler) AcceptSkill(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name        string `json:"name"`
+		Body        string `json:"body"`
+		AppliesWhen string `json:"appliesWhen"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if body.Name == "" || body.Body == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name and body required"})
+		return
+	}
+	// Sanitize: only kebab-case slug allowed as filename.
+	slug := strings.ToLower(strings.TrimSpace(body.Name))
+	cleaned := []rune{}
+	for _, r := range slug {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			cleaned = append(cleaned, r)
+		}
+	}
+	slug = string(cleaned)
+	if slug == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name must be kebab-case slug"})
+		return
+	}
+	dir := perUserSkillsDir(store.DefaultUserID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	content := body.Body
+	if body.AppliesWhen != "" && body.AppliesWhen != "always" {
+		content = "---\nactivate_when: " + body.AppliesWhen + "\n---\n\n" + content
+	}
+	path := filepath.Join(dir, slug+".md")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"path": path, "slug": slug})
+}
+
+func (h *Handler) MemoryStats(w http.ResponseWriter, r *http.Request) {
+	if h.Memory == nil {
+		writeJSON(w, http.StatusOK, map[string]any{})
+		return
+	}
+	writeJSON(w, http.StatusOK, h.Memory.Stats(store.DefaultUserID))
+}
+
+func (h *Handler) PruneMemory(w http.ResponseWriter, r *http.Request) {
+	if h.Memory == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "memory not wired"})
+		return
+	}
+	n, err := h.Memory.PruneStale(store.DefaultUserID, 90, 60, 0)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"archived": n})
+}
+
+// ListUserSkills returns the per-user skill overlay files.
+func (h *Handler) ListUserSkills(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"skills": loadOverlaySkills(store.DefaultUserID)})
+}
+
+// --- Skill proposal lifecycle (Phase 4 nightly evolver writes here) ---
+
+func (h *Handler) ListSkillProposals(w http.ResponseWriter, r *http.Request) {
+	status := r.URL.Query().Get("status")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"proposals": h.Store.ListSkillProposals(store.DefaultUserID, status),
+	})
+}
+
+func (h *Handler) AcceptSkillProposal(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	p, err := h.Store.GetSkillProposal(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+	// Write the file to the per-user overlay.
+	dir := perUserSkillsDir(p.UserID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	content := p.SkillBody
+	if p.AppliesWhen != "" && p.AppliesWhen != "always" {
+		content = "---\nactivate_when: " + p.AppliesWhen + "\n---\n\n" + content
+	}
+	if err := os.WriteFile(filepath.Join(dir, p.SkillName+".md"), []byte(content), 0o644); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	resolved, _ := h.Store.ResolveSkillProposal(id, "accepted")
+	writeJSON(w, http.StatusOK, resolved)
+}
+
+func (h *Handler) RejectSkillProposal(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	resolved, err := h.Store.ResolveSkillProposal(id, "rejected")
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, resolved)
+}
+
+// TriggerSkillEvolve kicks the periodic evolver immediately ("Evolve now" UX).
+func (h *Handler) TriggerSkillEvolve(w http.ResponseWriter, r *http.Request) {
+	if h.SkillEvolver == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "skill evolver not wired"})
+		return
+	}
+	go h.SkillEvolver.RunOnce(store.DefaultUserID)
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "running"})
+}
+
+func (h *Handler) DeleteUserSkill(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if name == "" || strings.Contains(name, "..") || strings.Contains(name, "/") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad name"})
+		return
+	}
+	path := filepath.Join(perUserSkillsDir(store.DefaultUserID), name+".md")
+	if err := os.Remove(path); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func perUserSkillsDir(userID string) string {
+	// The generator process owns the canonical prompts/ dir. We write to the
+	// same on-disk location so the next /generate request reloads from there.
+	root := os.Getenv("PLATFORM_GENERATOR_PROMPTS_DIR")
+	if root == "" {
+		// Default to ../generator/prompts relative to the api binary's CWD.
+		wd, _ := os.Getwd()
+		root = filepath.Join(filepath.Dir(wd), "generator", "prompts")
+	}
+	return filepath.Join(root, "users", userID, "skills")
+}
+
+func loadOverlaySkills(userID string) []reflection.ExistingSkill {
+	dir := perUserSkillsDir(userID)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	out := []reflection.ExistingSkill{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		out = append(out, reflection.ExistingSkill{
+			Name: strings.TrimSuffix(e.Name(), ".md"),
+			Body: string(body),
+		})
+	}
+	return out
+}
+
+// --- Profile + suggestion HTTP surface ---
+
+func (h *Handler) GetUserProfile(w http.ResponseWriter, r *http.Request) {
+	if h.Store == nil {
+		writeJSON(w, http.StatusOK, map[string]any{})
+		return
+	}
+	p, err := h.Store.GetUserProfile(store.DefaultUserID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if p == nil {
+		writeJSON(w, http.StatusOK, &store.UserProfile{UserID: store.DefaultUserID})
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+func (h *Handler) PutUserProfile(w http.ResponseWriter, r *http.Request) {
+	var p store.UserProfile
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	p.UserID = store.DefaultUserID
+	if err := h.Store.UpsertUserProfile(&p); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, &p)
+}
+
+func (h *Handler) ListProfileSuggestions(w http.ResponseWriter, r *http.Request) {
+	status := r.URL.Query().Get("status")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"suggestions": h.Store.ListProfileSuggestions(store.DefaultUserID, status),
+	})
+}
+
+func (h *Handler) ResolveProfileSuggestion(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var body struct {
+		Status string `json:"status"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if body.Status != "accepted" && body.Status != "rejected" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "status must be accepted or rejected"})
+		return
+	}
+	s, err := h.Store.ResolveProfileSuggestion(id, body.Status)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+	// On accept, write the value into user_profile so the next chat uses it.
+	if body.Status == "accepted" {
+		p, _ := h.Store.GetUserProfile(s.UserID)
+		if p == nil {
+			p = &store.UserProfile{UserID: s.UserID}
+		}
+		switch s.Field {
+		case "preferred_language":
+			p.PreferredLanguage = s.Value
+		case "reply_tone":
+			p.ReplyTone = s.Value
+		case "expertise_level":
+			p.ExpertiseLevel = s.Value
+		default:
+			// Unknown field — store as a hard rule prefixed with the field name.
+			p.HardRules = append(p.HardRules, fmt.Sprintf("%s: %s", s.Field, s.Value))
+		}
+		_ = h.Store.UpsertUserProfile(p)
+	}
+	writeJSON(w, http.StatusOK, s)
+}
+
+// loadUserProfileMap returns the stable user-profile fields the generator
+// should honor verbatim. Includes any accepted suggestions; pending ones live
+// in user_profile_suggestions.
+func (h *Handler) loadUserProfileMap(userID string) map[string]any {
+	if h.Store == nil {
+		return nil
+	}
+	p, err := h.Store.GetUserProfile(userID)
+	if err != nil || p == nil {
+		return nil
+	}
+	out := map[string]any{}
+	if p.PreferredLanguage != "" {
+		out["preferred_language"] = p.PreferredLanguage
+	}
+	if p.ReplyTone != "" {
+		out["reply_tone"] = p.ReplyTone
+	}
+	if p.ExpertiseLevel != "" {
+		out["expertise_level"] = p.ExpertiseLevel
+	}
+	if len(p.HardRules) > 0 {
+		out["hard_rules"] = p.HardRules
+	}
+	if len(p.DefaultRepos) > 0 {
+		out["default_repos"] = p.DefaultRepos
+	}
+	if len(p.DefaultChannels) > 0 {
+		out["default_channels"] = p.DefaultChannels
+	}
+	if len(p.DefaultModels) > 0 {
+		out["default_models"] = p.DefaultModels
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (h *Handler) GetVerification(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	v := h.lastVerification(id)
+	if v == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no verification yet"})
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+// GetVerificationScreenshot streams the screenshot PNG from disk. The path is
+// captured in the verification result; we only serve files under the
+// platform's verifications directory.
+func (h *Handler) GetVerificationScreenshot(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	v := h.lastVerification(id)
+	if v == nil || v.ScreenshotPath == "" {
+		http.Error(w, "no screenshot", http.StatusNotFound)
+		return
+	}
+	home, _ := os.UserHomeDir()
+	root := filepath.Join(home, ".platform", "verifications")
+	abs, err := filepath.Abs(v.ScreenshotPath)
+	if err != nil || !strings.HasPrefix(abs, root) {
+		http.Error(w, "bad path", http.StatusBadRequest)
+		return
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		http.Error(w, "read failed", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "image/png")
+	_, _ = io.Copy(w, f)
 }
 
 // --- OAuth ------------------------------------------------------------
@@ -213,9 +868,10 @@ func (h *Handler) GetTask(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateTaskBody struct {
-	Description  *string           `json:"description,omitempty"`
-	Triggers     *[]store.Trigger  `json:"triggers,omitempty"`
-	Capabilities *[]string         `json:"capabilities,omitempty"`
+	Name         *string            `json:"name,omitempty"`
+	Description  *string            `json:"description,omitempty"`
+	Triggers     *[]store.Trigger   `json:"triggers,omitempty"`
+	Capabilities *[]string          `json:"capabilities,omitempty"`
 	Model        *store.ModelConfig `json:"model,omitempty"`
 }
 
@@ -227,6 +883,12 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t, err := h.Store.UpdateTask(id, func(t *store.Task) {
+		if body.Name != nil {
+			name := strings.TrimSpace(*body.Name)
+			if name != "" {
+				t.Name = name
+			}
+		}
 		if body.Description != nil {
 			t.Description = *body.Description
 		}
@@ -249,19 +911,60 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	h.archiveBeforeDelete(id)
 	if err := h.Store.DeleteTask(id); errors.Is(err, store.ErrNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		return
 	}
 	// Best-effort: remove the on-disk source so the supervisor can't pick
-	// the task back up.
+	// the task back up. The archive table already has a copy.
 	_ = os.RemoveAll(h.Files.Dir(id))
 	h.Bus.Publish(store.Event{
-		Channel: "task:deleted:" + store.DefaultUserID,
+		Channel: "task:archived:" + store.DefaultUserID,
 		UserID:  store.DefaultUserID,
 		TaskID:  id,
 	})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// archiveBeforeDelete snapshots the task row + on-disk source files into the
+// task_archive table. The live `tasks` row and disk files are deleted right
+// after this returns — the archive copy is what stays around.
+func (h *Handler) archiveBeforeDelete(id string) {
+	t, err := h.Store.GetTask(id)
+	if err != nil {
+		return
+	}
+	files := map[string]string{}
+	dir := h.Files.Dir(id)
+	for _, name := range []string{"main.ts", "workflow.yaml"} {
+		if body, err := os.ReadFile(filepath.Join(dir, name)); err == nil {
+			files[name] = string(body)
+		}
+	}
+	if err := h.Store.ArchiveTask(t, files); err != nil {
+		log.Printf("archive task %s failed: %v", id, err)
+	}
+}
+
+func (h *Handler) ListArchivedTasks(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tasks": h.Store.ListArchivedTasks(store.DefaultUserID),
+	})
+}
+
+func (h *Handler) GetArchivedTask(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	a, err := h.Store.GetArchivedTask(id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, a)
 }
 
 // SetServiceEnabled flips a service-kind task on or off. When disabled, the
@@ -370,18 +1073,60 @@ func (h *Handler) CancelRun(w http.ResponseWriter, r *http.Request) {
 
 // --- code -------------------------------------------------------------
 
+// GetTaskCode returns every authored source file in the task tree. It walks
+// the workflow's on-disk dir but excludes runtime cruft (node_modules,
+// generated dist, the launcher we inject, lockfiles) so the UI shows what
+// the agent actually shipped, not what the runner created.
 func (h *Handler) GetTaskCode(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	yaml, errY := h.Files.ReadFile(id, "workflow.yaml")
-	main, errM := h.Files.ReadFile(id, "main.ts")
-	if errors.Is(errY, store.ErrNotFound) && errors.Is(errM, store.ErrNotFound) {
+	dir := h.Files.Dir(id)
+	if _, err := os.Stat(dir); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no code"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"workflow.yaml": yaml,
-		"main.ts":       main,
+
+	files := map[string]string{}
+	skipDir := map[string]bool{"node_modules": true, "dist": true, ".git": true, ".turbo": true}
+	skipFile := map[string]bool{"_launcher.mjs": true, "pnpm-lock.yaml": true, "package-lock.json": true, "yarn.lock": true}
+	const maxBytes = 256 * 1024 // 256KB per file; bigger gets truncated
+
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, _ := filepath.Rel(dir, path)
+		if rel == "." {
+			return nil
+		}
+		// Walk skips by returning filepath.SkipDir.
+		if info.IsDir() {
+			if skipDir[info.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if skipFile[info.Name()] {
+			return nil
+		}
+		// Read up to maxBytes so a stray giant blob doesn't blow up the
+		// response — we trim and mark with a sentinel.
+		b, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return nil
+		}
+		body := string(b)
+		if len(body) > maxBytes {
+			body = body[:maxBytes] + "\n\n… (truncated; file is " + strconv.Itoa(len(b)) + " bytes)"
+		}
+		files[filepath.ToSlash(rel)] = body
+		return nil
 	})
+
+	if len(files) == 0 {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no code"})
+		return
+	}
+	writeJSON(w, http.StatusOK, files)
 }
 
 // --- SSE --------------------------------------------------------------
@@ -444,8 +1189,10 @@ func (h *Handler) TaskEventsStream(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ActivityStream(w http.ResponseWriter, r *http.Request) {
 	userID := chi.URLParam(r, "id")
 	patterns := []string{
-		"trigger:fired:*", "run:state:*", "task:created:*",
+		"trigger:fired:*", "run:state:*",
+		"task:created:*", "task:updated:*", "task:archived:*",
 		"evolution:proposed:*", "memory:written:*", "reflection:complete:*",
+		"chat:progress:*",
 	}
 	cancels := make([]func(), 0, len(patterns))
 	merged := make(chan store.Event, 64)
@@ -550,11 +1297,40 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 				tail = append(tail, fmt.Sprintf("[%s] %s", l.Stream, l.Text))
 			}
 		}
-		existing = append(existing, generator.ExistingTask{
+		ex := generator.ExistingTask{
 			ID: t.ID, Name: t.Name, Description: t.Description, Kind: t.Kind,
 			Capabilities: t.Capabilities, Triggers: gtTriggers, MainTs: mainTs,
 			LastRunState: lastState, LastRunError: lastError, RecentLogTail: tail,
-		})
+		}
+		if v := h.lastVerification(t.ID); v != nil {
+			ex.LastVerification = &generator.VerificationSnapshot{
+				OK:            v.OK,
+				Errors:        v.Errors,
+				ConsoleErrors: v.ConsoleErrors,
+				PageErrors:    v.PageErrors,
+				Status:        v.Status,
+				TextChars:     v.TextChars,
+				DurationMs:    v.DurationMs,
+			}
+		}
+		if d := h.lastDryRun(t.ID); d != nil {
+			// Keep only the tail of stderr so we don't blow up the prompt
+			// — three lines is usually enough to point the agent at the
+			// failing call.
+			tail := d.Stderr
+			if len(tail) > 8 {
+				tail = tail[len(tail)-8:]
+			}
+			ex.LastDryRun = &generator.DryRunSnapshot{
+				OK:         d.OK,
+				ExitCode:   d.ExitCode,
+				FatalError: d.FatalError,
+				Stderr:     tail,
+				DurationMs: d.DurationMs,
+				TimedOut:   d.TimedOut,
+			}
+		}
+		existing = append(existing, ex)
 	}
 
 	// In the 1:1 chat-per-task model, sessionID == taskID. Surface whether
@@ -571,6 +1347,18 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 		activeTaskID = ""
 	}
 
+	// Phase 1 self-tuning: retrieve user-scope memories that match this turn
+	// and any pinned memories the user explicitly anchored. Both go into the
+	// generator request so the agent can adapt to known preferences.
+	retrievedMem := h.gatherUserContext(store.DefaultUserID, body.Content, history)
+	memHints := make([]generator.MemoryHint, 0, len(retrievedMem))
+	for _, m := range retrievedMem {
+		memHints = append(memHints, generator.MemoryHint{Topic: m.Topic, Content: m.Content, Pinned: m.Pinned})
+	}
+	// Phase 2 self-tuning: load the user's stable profile (preferred language,
+	// reply tone, hard rules, etc.) and pass verbatim.
+	userProfile := h.loadUserProfileMap(store.DefaultUserID)
+
 	outcome, err := h.Generator.Generate(ctx, generator.Request{
 		Prompt:              body.Content,
 		SessionID:           sessionID,
@@ -580,6 +1368,16 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 		ConnectorsAvailable: connectors,
 		History:             history,
 		ExistingTasks:       existing,
+		UserContext:         memHints,
+		UserProfile:         userProfile,
+	}, func(channel string, payload json.RawMessage) {
+		var data any
+		_ = json.Unmarshal(payload, &data)
+		h.Bus.Publish(store.Event{
+			Channel: "chat:progress:" + sessionID,
+			UserID:  store.DefaultUserID,
+			Payload: map[string]any{"channel": channel, "data": data},
+		})
 	})
 	if err != nil {
 		log.Printf("generator failed: %v", err)
@@ -594,6 +1392,12 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 		outcome.Intent = generator.IntentUpdate
 		outcome.TargetTaskID = activeTaskID
 	}
+
+	// Phase 1 self-tuning: kick off chat reflection asynchronously after the
+	// reply is computed. It extracts user-level preferences/corrections from
+	// (user msg, agent reply) and persists them as memory_entries; future
+	// turns will see them via gatherUserContext.
+	h.scheduleChatReflection(body.Content, outcome.Reply, sessionID, store.DefaultUserID, history, retrievedMem)
 
 	switch outcome.Intent {
 	case generator.IntentChat:
@@ -658,11 +1462,12 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 	case generator.IntentDelete:
 		deleted := []string{}
 		for _, id := range outcome.TargetTaskIDs {
+			h.archiveBeforeDelete(id)
 			if err := h.Store.DeleteTask(id); err == nil {
 				_ = os.RemoveAll(h.Files.Dir(id))
 				deleted = append(deleted, id)
 				h.Bus.Publish(store.Event{
-					Channel: "task:deleted:" + store.DefaultUserID,
+					Channel: "task:archived:" + store.DefaultUserID,
 					UserID:  store.DefaultUserID,
 					TaskID:  id,
 				})
@@ -701,6 +1506,9 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 			if outcome.Kind != "" {
 				t.Kind = outcome.Kind
 			}
+			if outcome.Ports != nil {
+				t.Ports = translatePorts(outcome.Ports)
+			}
 		})
 		if errors.Is(err, store.ErrNotFound) {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "target task not found: " + taskID})
@@ -710,8 +1518,10 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 			if err := h.Files.WriteFiles(taskID, outcome.Files); err != nil {
 				log.Printf("update write failed: %v", err)
 			}
+			h.scheduleDryRun(taskID, sessionID)
 			if task.Kind == "service" && h.Services != nil {
 				h.Services.Restart(taskID)
+				h.scheduleVerification(taskID, sessionID)
 			}
 		}
 		h.Bus.Publish(store.Event{
@@ -743,9 +1553,14 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 			Capabilities: outcome.Capabilities,
 			Triggers:     translateTriggers(outcome.Triggers),
 			Kind:         kind,
+			Ports:        translatePorts(outcome.Ports),
 		})
 		if err := h.Files.WriteFiles(task.ID, outcome.Files); err != nil {
 			log.Printf("workflow write failed: %v", err)
+		}
+		h.scheduleDryRun(task.ID, sessionID)
+		if task.Kind == "service" {
+			h.scheduleVerification(task.ID, sessionID)
 		}
 		h.Bus.Publish(store.Event{
 			Channel: "task:created:" + store.DefaultUserID,
@@ -1056,19 +1871,59 @@ func (h *Handler) ForkTask(w http.ResponseWriter, r *http.Request) {
 
 // --- dashboards -------------------------------------------------------
 
-// ServeDashboard reverse-proxies /d/<task_id>/<rest> to the workflow's own
-// HTTP server (running as a kind=service daemon on a loopback port the
-// platform allocated at spawn time). WebSockets and SSE pass through.
+// ServeDashboard reverse-proxies /d/<task_id>/[<name>/]<rest> to the
+// workflow's HTTP server. The workflow can declare multiple named ports
+// (UI, API, websocket, …) via task.Ports; each is exposed under its name.
+// The bare `/d/<task_id>/` form forwards to the "ui" role port (iframe
+// default).
 //
-// If the task has no live port mapping yet (e.g. service still booting),
-// we briefly retry — the workflow usually binds within a second of spawn.
+// Unregistered names → 404. We never forward to ports the agent didn't
+// explicitly declare.
+//
+// WebSockets and SSE pass through. If the task has no live port mapping yet
+// (e.g. service still booting), we briefly retry — the workflow usually
+// binds within a second of spawn.
 func (h *Handler) ServeDashboard(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskId")
 
-	port, ok := h.Ports.Lookup(taskID)
-	if !ok {
-		http.Error(w, "no dashboard running for this task. Make it a service workflow that listens on process.env.PLATFORM_PORT.", http.StatusNotFound)
+	// Path shape: /d/<task>/<rest...>. Peek the first segment of <rest> —
+	// if it matches a registered binding name, route there with a longer
+	// prefix strip; otherwise fall through to the "ui" port.
+	publicPrefix := "/d/" + taskID
+	rest := strings.TrimPrefix(r.URL.Path, publicPrefix)
+	rest = strings.TrimPrefix(rest, "/")
+
+	var port int
+	var name string
+	if rest != "" {
+		first := rest
+		if i := strings.Index(rest, "/"); i >= 0 {
+			first = rest[:i]
+		}
+		if b, ok := h.Ports.LookupNamed(taskID, first); ok {
+			port = b.Port
+			name = first
+		}
+	}
+	if port == 0 {
+		// No named match — try the "ui" default. If neither, 404.
+		if p, ok := h.Ports.Lookup(taskID); ok {
+			port = p
+		}
+	}
+	if port == 0 {
+		http.Error(w, "no dashboard running for this task. Declare a port (role:\"ui\") in the workflow's ports[].", http.StatusNotFound)
 		return
+	}
+
+	// The prefix to strip from the inbound URL so the workflow sees a clean
+	// path. When we routed via a name, the name itself is part of the
+	// prefix (the workflow doesn't know it lives under /<name>/).
+	stripPrefix := publicPrefix
+	publicBase := publicPrefix
+	if name != "" {
+		stripPrefix = publicPrefix + "/" + name
+		publicBase = stripPrefix
 	}
 
 	target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
@@ -1077,29 +1932,32 @@ func (h *Handler) ServeDashboard(w http.ResponseWriter, r *http.Request) {
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
 			req.Host = target.Host
-			// Strip the /d/<task_id> prefix so the workflow sees a clean path.
-			prefix := "/d/" + taskID
-			req.URL.Path = strings.TrimPrefix(req.URL.Path, prefix)
+			req.URL.Path = strings.TrimPrefix(req.URL.Path, stripPrefix)
 			if req.URL.Path == "" {
 				req.URL.Path = "/"
 			}
-			// Surface the public base path so the workflow can build absolute
-			// URLs that route back through the proxy.
-			req.Header.Set("X-Forwarded-Prefix", prefix)
+			req.Header.Set("X-Forwarded-Prefix", publicBase)
 			req.Header.Set("X-Forwarded-Proto", "http")
 			if _, hasUA := req.Header["User-Agent"]; !hasUA {
 				req.Header.Set("User-Agent", "")
 			}
 		},
-		// Retry once if the listener isn't up yet — service workflows take a
-		// beat to bind after spawn.
 		Transport: &retryTransport{base: http.DefaultTransport, attempts: 3, gap: 400 * time.Millisecond},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			log.Printf("dashboard proxy error for %s: %v", taskID, err)
+			log.Printf("dashboard proxy error for %s (name=%q port=%d): %v", taskID, name, port, err)
 			http.Error(w, "dashboard upstream unreachable: "+err.Error(), http.StatusBadGateway)
 		},
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+// ListTaskPorts returns the live port-forwarding map for a task — what names
+// are registered, what roles they have, what loopback port the platform
+// allocated. Used by the UIPane "ports" view.
+func (h *Handler) ListTaskPorts(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	out := h.Ports.ListForTask(id)
+	writeJSON(w, http.StatusOK, map[string]any{"ports": out})
 }
 
 type retryTransport struct {
@@ -1158,6 +2016,31 @@ func translateTriggers(in []generator.Trigger) []store.Trigger {
 		out = append(out, store.Trigger{
 			ID: t.ID, Type: t.Type, Enabled: t.Enabled, Config: t.Config,
 		})
+	}
+	return out
+}
+
+func translatePorts(in []generator.Port) []store.TaskPort {
+	out := make([]store.TaskPort, 0, len(in))
+	seenUI := false
+	for _, p := range in {
+		name := strings.TrimSpace(p.Name)
+		if name == "" {
+			continue
+		}
+		role := p.Role
+		if role == "" {
+			role = "other"
+		}
+		// Defensive: collapse multiple ui-roles to the first one so the
+		// reverse-proxy default stays unambiguous.
+		if role == "ui" {
+			if seenUI {
+				role = "other"
+			}
+			seenUI = true
+		}
+		out = append(out, store.TaskPort{Name: name, Role: role})
 	}
 	return out
 }

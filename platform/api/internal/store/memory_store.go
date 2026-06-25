@@ -136,7 +136,7 @@ func (m *MemoryStore) get(ctx context.Context, id string) (*MemoryEntry, error) 
 
 func (m *MemoryStore) List(userID string, scope MemoryScope, scopeKey string) []*MemoryEntry {
 	q := `SELECT id, user_id, scope, scope_key, topic, content, pinned, source_run_id, created_at, updated_at
-		FROM memory_entries WHERE user_id=$1`
+		FROM memory_entries WHERE user_id=$1 AND archived_at IS NULL`
 	args := []any{userID}
 	if scope != "" {
 		q += ` AND scope=$2`
@@ -191,7 +191,7 @@ func (m *MemoryStore) Search(userID, query string, topK int) []*MemoryEntry {
 			SELECT id, user_id, scope, scope_key, topic, content, pinned, source_run_id, created_at, updated_at,
 			       (0.6 * (1 - (embedding <=> $1)) + 0.4 * similarity(content, $2)) AS rank
 			FROM memory_entries
-			WHERE user_id=$3 AND embedding IS NOT NULL
+			WHERE user_id=$3 AND embedding IS NOT NULL AND archived_at IS NULL
 			ORDER BY rank DESC
 			LIMIT $4`, queryVec, query, userID, topK)
 		if err == nil {
@@ -204,7 +204,7 @@ func (m *MemoryStore) Search(userID, query string, topK int) []*MemoryEntry {
 		SELECT id, user_id, scope, scope_key, topic, content, pinned, source_run_id, created_at, updated_at,
 		       similarity(content, $1) AS rank
 		FROM memory_entries
-		WHERE user_id=$2 AND content % $1
+		WHERE user_id=$2 AND content % $1 AND archived_at IS NULL
 		ORDER BY rank DESC
 		LIMIT $3`, query, userID, topK)
 	if err != nil {
@@ -212,6 +212,59 @@ func (m *MemoryStore) Search(userID, query string, topK int) []*MemoryEntry {
 	}
 	defer rows.Close()
 	return collectMemoryWithRank(rows)
+}
+
+// PruneStale soft-archives non-pinned memories that have aged out and are
+// not getting retrieval hits. Three tiers, OR'd together:
+//   1. created > maxAgeDays days ago AND read_count = 0
+//   2. last_read_at older than staleDays
+//   3. created > maxAgeDays AND read_count <= rarelyReadThreshold
+// Pinned entries are NEVER archived. Returns the number of rows archived.
+func (m *MemoryStore) PruneStale(userID string, maxAgeDays, staleDays, rarelyReadThreshold int) (int, error) {
+	if maxAgeDays <= 0 {
+		maxAgeDays = 90
+	}
+	if staleDays <= 0 {
+		staleDays = 60
+	}
+	tag, err := m.pool.Exec(context.Background(), `
+		UPDATE memory_entries
+		SET archived_at = now()
+		WHERE user_id = $1
+		  AND archived_at IS NULL
+		  AND pinned = false
+		  AND (
+		    (created_at < now() - make_interval(days => $2) AND read_count = 0)
+		    OR (last_read_at IS NOT NULL AND last_read_at < now() - make_interval(days => $3))
+		    OR (created_at < now() - make_interval(days => $2) AND read_count <= $4)
+		  )`,
+		userID, maxAgeDays, staleDays, rarelyReadThreshold)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// PruneStats returns counters for the most recent prune decisions — useful
+// for telemetry and the Settings → Memory view.
+type PruneStats struct {
+	Total    int
+	Pinned   int
+	Archived int
+	Active   int
+}
+
+func (m *MemoryStore) Stats(userID string) PruneStats {
+	var s PruneStats
+	row := m.pool.QueryRow(context.Background(), `
+		SELECT
+		  count(*),
+		  count(*) FILTER (WHERE pinned = true),
+		  count(*) FILTER (WHERE archived_at IS NOT NULL),
+		  count(*) FILTER (WHERE archived_at IS NULL)
+		FROM memory_entries WHERE user_id = $1`, userID)
+	_ = row.Scan(&s.Total, &s.Pinned, &s.Archived, &s.Active)
+	return s
 }
 
 func collectMemoryWithRank(rows pgx.Rows) []*MemoryEntry {
