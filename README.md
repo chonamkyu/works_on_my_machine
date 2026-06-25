@@ -21,4 +21,6 @@ platform/
 ```
 
 See [`platform/README.md`](./platform/README.md) for the architecture
-write-up, env config, and quick-start.
+write-up, env config, and quick-start. The shell's visual language
+(palette, typography, layout grid, keyboard map) lives in
+[`platform/web/DESIGN.md`](./platform/web/DESIGN.md).
