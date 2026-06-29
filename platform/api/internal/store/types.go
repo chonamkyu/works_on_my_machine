@@ -48,9 +48,14 @@ type Task struct {
 	// allocates a loopback port per entry and exposes them at
 	// /d/<task>/<name>/. Exactly one entry should have role="ui" — that's
 	// the iframe default.
-	Ports     []TaskPort `json:"ports"`
-	CreatedAt time.Time  `json:"createdAt"`
-	UpdatedAt time.Time  `json:"updatedAt"`
+	Ports []TaskPort `json:"ports"`
+	// HasChatHandler is set to true when the workflow code calls
+	// `workflow.chatHandler(...)`. The platform routes chat messages in
+	// this task's session directly to the daemon (port name "chat")
+	// instead of through the meta-agent.
+	HasChatHandler bool      `json:"hasChatHandler"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 // TaskPort is one declared HTTP surface for a service task.

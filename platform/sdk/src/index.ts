@@ -21,7 +21,107 @@ export const workflow = {
   ): (ctx?: Ctx) => Promise<T> {
     return fn;
   },
+
+  /**
+   * Declare this task as a chat agent. The platform turns the task into a
+   * long-running service, binds an HTTP listener on PLATFORM_PORT_CHAT, and
+   * routes every chat message in this task's session through `fn`. Skip
+   * `workflow.entrypoint` — `chatHandler` IS the entrypoint.
+   *
+   *   export default workflow.chatHandler(async (msg, ctx) => {
+   *     return { reply: String(eval(msg.content)) };
+   *   });
+   *
+   * `msg.history` is the last ~12 turns so the handler can keep a thread of
+   * thought. For longer memory write to `ctx.memory` and read it back.
+   */
+  chatHandler(
+    fn: (msg: ChatMessage, ctx: Ctx) => Promise<ChatReply>,
+  ): (ctx?: Ctx) => Promise<never> {
+    return async (ctx?: Ctx): Promise<never> => {
+      const real = ctx ?? defaultCtx();
+      await mountChatHandler(fn, real);
+      return new Promise<never>(() => {});
+    };
+  },
 };
+
+export interface ChatMessage {
+  /** The user's latest message text. */
+  content: string;
+  /** Conversation history, oldest first, excluding the latest user message. */
+  history: Array<{ role: "user" | "assistant"; content: string }>;
+  /** Session id == task id in our 1:1 model. */
+  sessionId: string;
+}
+
+export interface ChatReply {
+  /** Plain-text reply the user sees in the chat pane. */
+  reply: string;
+  /** Optional structured attachments — code blocks, links, etc. */
+  attachments?: Array<{ kind: "code"; lang?: string; body: string } | { kind: "link"; url: string; label?: string }>;
+}
+
+async function mountChatHandler(
+  fn: (msg: ChatMessage, ctx: Ctx) => Promise<ChatReply>,
+  ctx: Ctx,
+): Promise<void> {
+  const http = await import("node:http");
+  const port = Number(process.env.PLATFORM_PORT_CHAT ?? 0);
+  if (!port) {
+    throw new Error(
+      "workflow.chatHandler: PLATFORM_PORT_CHAT not set. The platform allocates this when a task declares chat handler — make sure you're on a recent platform build and the task was re-registered.",
+    );
+  }
+  const server = http.createServer(async (req, res) => {
+    if (req.method !== "POST") {
+      res.writeHead(405, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "use POST" }));
+      return;
+    }
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    let msg: ChatMessage;
+    try {
+      msg = JSON.parse(body || "{}");
+    } catch {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "invalid JSON body" }));
+      return;
+    }
+    if (!msg.content || typeof msg.content !== "string") {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "content required" }));
+      return;
+    }
+    msg.history = Array.isArray(msg.history) ? msg.history : [];
+    msg.sessionId = msg.sessionId ?? process.env.PLATFORM_TASK_ID ?? "";
+    try {
+      const out = await fn(msg, ctx);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(out));
+    } catch (err) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: (err as Error).message }));
+    }
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(port, "127.0.0.1", () => resolve());
+  });
+}
+
+function defaultCtx(): Ctx {
+  // Minimal stub when the entrypoint is invoked without a ctx. Real ctx is
+  // injected by the launcher; this only matters for direct-import tests.
+  const noop = async () => undefined as any;
+  return {
+    checkpoint: <T>(_n: string, fn: () => Promise<T>) => fn() as any,
+    kv: { get: noop, set: noop, delete: noop },
+    memory: { read: noop, write: noop, task: { read: noop, write: noop } },
+    reflect: { note: () => undefined },
+    log: { info: console.log, warn: console.warn, error: console.error, debug: console.debug },
+  } as unknown as Ctx;
+}
 
 export interface CheckpointHandle {
   run<T>(fn: () => Promise<T>): Promise<T>;
@@ -204,4 +304,4 @@ export const claude = {
 };
 
 export { llmgateClient };
-export type { ChatMessage, CompleteArgs, CompleteResult } from "./llm.js";
+export type { LlmChatMessage, CompleteArgs, CompleteResult } from "./llm.js";

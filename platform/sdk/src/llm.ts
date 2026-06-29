@@ -6,14 +6,14 @@
  * llmgate's logging, budget, and Bedrock fan-out for free.
  */
 
-export interface ChatMessage {
+export interface LlmChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
 }
 
 export interface CompleteArgs {
   prompt?: string;
-  messages?: ChatMessage[];
+  messages?: LlmChatMessage[];
   model?: string;
   maxTokens?: number;
   temperature?: number;
@@ -67,7 +67,7 @@ export function llmgateClient(opts: LlmgateClientOpts = {}) {
 
   return {
     async complete(args: CompleteArgs): Promise<CompleteResult> {
-      const messages: ChatMessage[] =
+      const messages: LlmChatMessage[] =
         args.messages ??
         (args.prompt ? [{ role: "user", content: args.prompt }] : []);
       if (messages.length === 0) {
@@ -144,7 +144,7 @@ export function llmgateClient(opts: LlmgateClientOpts = {}) {
       args: CompleteArgs,
       onDelta: (chunk: string) => void,
     ): Promise<CompleteResult> {
-      const messages: ChatMessage[] =
+      const messages: LlmChatMessage[] =
         args.messages ??
         (args.prompt ? [{ role: "user", content: args.prompt }] : []);
       if (messages.length === 0) {

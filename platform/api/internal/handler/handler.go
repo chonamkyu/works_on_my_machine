@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"bytes"
 	"io"
 	"log"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -1246,6 +1248,23 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 	// Persist user message.
 	_, _ = h.Store.AppendMessage(sessionID, "user", body.Content, nil)
 
+	// session == task in our 1:1 model. If the task is a chat-handler
+	// agent (workflow.chatHandler), route the message directly to the
+	// daemon UNLESS the user prefixed a slash command (/edit, /code, …),
+	// which means "talk to the meta-agent about this task instead".
+	content := strings.TrimSpace(body.Content)
+	if t, err := h.Store.GetTask(sessionID); err == nil && t.HasChatHandler && !strings.HasPrefix(content, "/") {
+		h.routeChatToTaskHandler(w, t, sessionID, body.Content)
+		return
+	}
+
+	// Slash command shortcuts. Cheap regex routes — bypass generator for
+	// the common ones, fall through to generator for unknown slashes (so
+	// `/edit do X` reaches it with the `/edit ` stripped).
+	if strings.HasPrefix(content, "/") && handleSlashCommand(h, w, r, sessionID, content) {
+		return
+	}
+
 	if looksLikeGreeting(body.Content) {
 		reply := "👋"
 		_, _ = h.Store.AppendMessage(sessionID, "assistant", reply, nil)
@@ -1509,6 +1528,16 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 			if outcome.Ports != nil {
 				t.Ports = translatePorts(outcome.Ports)
 			}
+			if mainTs, ok := outcome.Files["main.ts"]; ok {
+				t.HasChatHandler = detectChatHandler(mainTs)
+				if t.HasChatHandler {
+					// Chat agents must run as services and bind a chat port.
+					if t.Kind != "service" {
+						t.Kind = "service"
+					}
+					t.Ports = ensureChatPort(t.Ports)
+				}
+			}
 		})
 		if errors.Is(err, store.ErrNotFound) {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "target task not found: " + taskID})
@@ -1546,14 +1575,23 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 		if kind != "service" {
 			kind = "oneshot"
 		}
+		ports := translatePorts(outcome.Ports)
+		hasChat := detectChatHandler(outcome.Files["main.ts"])
+		if hasChat {
+			if kind != "service" {
+				kind = "service"
+			}
+			ports = ensureChatPort(ports)
+		}
 		task := h.Store.CreateTask(&store.Task{
-			UserID:       store.DefaultUserID,
-			Name:         outcome.Name,
-			Description:  outcome.Description,
-			Capabilities: outcome.Capabilities,
-			Triggers:     translateTriggers(outcome.Triggers),
-			Kind:         kind,
-			Ports:        translatePorts(outcome.Ports),
+			UserID:         store.DefaultUserID,
+			Name:           outcome.Name,
+			Description:    outcome.Description,
+			Capabilities:   outcome.Capabilities,
+			Triggers:       translateTriggers(outcome.Triggers),
+			Kind:           kind,
+			Ports:          ports,
+			HasChatHandler: hasChat,
 		})
 		if err := h.Files.WriteFiles(task.ID, outcome.Files); err != nil {
 			log.Printf("workflow write failed: %v", err)
@@ -2018,6 +2056,211 @@ func translateTriggers(in []generator.Trigger) []store.Trigger {
 		})
 	}
 	return out
+}
+
+// routeChatToTaskHandler forwards the user's chat message to the running
+// daemon's chat port (PLATFORM_PORT_CHAT, registered as ports[name=chat]).
+// Returns the daemon's reply to the user verbatim and persists both sides
+// to chat history.
+func (h *Handler) routeChatToTaskHandler(w http.ResponseWriter, t *store.Task, sessionID, content string) {
+	binding, ok := h.Ports.LookupNamed(t.ID, "chat")
+	if !ok {
+		// Handler is declared but the daemon hasn't bound yet (booting or
+		// crashed). Tell the user; the supervisor will recover.
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"sessionId": sessionID,
+			"reply":     "this agent isn't responding yet — give the supervisor a few seconds and try again.",
+		})
+		return
+	}
+
+	// Build the message envelope. Use the LAST ~12 turns of session history
+	// so the chat handler can keep context without re-querying.
+	histRows := h.Store.ListMessages(sessionID, 24)
+	hist := make([]map[string]string, 0, len(histRows))
+	for _, m := range histRows {
+		role := "user"
+		if m.Role != "user" {
+			role = "assistant"
+		}
+		hist = append(hist, map[string]string{"role": role, "content": m.Content})
+	}
+	// Drop the latest user message we just persisted — the handler gets it
+	// as `content`, not in history.
+	if n := len(hist); n > 0 && hist[n-1]["role"] == "user" && hist[n-1]["content"] == content {
+		hist = hist[:n-1]
+	}
+	if len(hist) > 12 {
+		hist = hist[len(hist)-12:]
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"content":   content,
+		"history":   hist,
+		"sessionId": sessionID,
+	})
+	req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/", binding.Port), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("chat handler %s unreachable: %v", t.ID, err)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"sessionId": sessionID,
+			"reply":     "the agent crashed mid-reply — try again in a moment.",
+		})
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		buf, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		log.Printf("chat handler %s returned %d: %s", t.ID, resp.StatusCode, string(buf))
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"sessionId": sessionID,
+			"reply":     fmt.Sprintf("agent error (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(buf))),
+		})
+		return
+	}
+	var out struct {
+		Reply       string `json:"reply"`
+		Attachments any    `json:"attachments,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"sessionId": sessionID,
+			"reply":     "agent returned malformed JSON.",
+		})
+		return
+	}
+	reply := strings.TrimSpace(out.Reply)
+	if reply == "" {
+		reply = "(empty reply)"
+	}
+	_, _ = h.Store.AppendMessage(sessionID, "assistant", reply, map[string]any{"chatHandler": true})
+	writeJSON(w, http.StatusOK, map[string]any{"sessionId": sessionID, "reply": reply})
+}
+
+// handleSlashCommand intercepts `/cmd …` messages and runs cheap routes
+// directly instead of paying a generator round trip. Returns true if it
+// handled the message; false to let generator pick it up.
+func handleSlashCommand(h *Handler, w http.ResponseWriter, r *http.Request, sessionID, content string) bool {
+	parts := strings.SplitN(strings.TrimPrefix(content, "/"), " ", 2)
+	cmd := strings.ToLower(parts[0])
+	rest := ""
+	if len(parts) > 1 {
+		rest = strings.TrimSpace(parts[1])
+	}
+	switch cmd {
+	case "help":
+		reply := strings.TrimSpace(`
+Slash commands:
+  /edit <prompt>   ask the meta-agent to update this task's code
+  /rename <name>   rename this task (kebab-case)
+  /archive         archive this task (code preserved)
+  /run             trigger a manual run (oneshot tasks)
+  /code            switch the right panel to the Code tab
+  /help            this message
+Anything else without a slash is sent straight to the task's chat handler
+(if declared) or to the meta-agent.`)
+		_, _ = h.Store.AppendMessage(sessionID, "assistant", reply, nil)
+		writeJSON(w, http.StatusOK, map[string]any{"sessionId": sessionID, "reply": reply})
+		return true
+	case "rename":
+		if rest == "" {
+			writeJSON(w, http.StatusOK, map[string]any{"sessionId": sessionID, "reply": "usage: /rename <new-name>"})
+			return true
+		}
+		if _, err := h.Store.UpdateTask(sessionID, func(t *store.Task) { t.Name = rest }); err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"sessionId": sessionID, "reply": "rename failed: " + err.Error()})
+			return true
+		}
+		_, _ = h.Store.AppendMessage(sessionID, "assistant", "renamed to "+rest, nil)
+		writeJSON(w, http.StatusOK, map[string]any{"sessionId": sessionID, "reply": "renamed to " + rest})
+		return true
+	case "archive":
+		h.archiveBeforeDelete(sessionID)
+		_ = h.Store.DeleteTask(sessionID)
+		_ = os.RemoveAll(h.Files.Dir(sessionID))
+		h.Bus.Publish(store.Event{Channel: "task:archived:" + store.DefaultUserID, UserID: store.DefaultUserID, TaskID: sessionID})
+		writeJSON(w, http.StatusOK, map[string]any{"sessionId": sessionID, "reply": "archived."})
+		return true
+	case "run":
+		if t, err := h.Store.GetTask(sessionID); err == nil && t.Kind != "service" {
+			run := h.Store.CreateRun(sessionID, "manual")
+			go h.Runner.Start(t, "manual")
+			writeJSON(w, http.StatusOK, map[string]any{"sessionId": sessionID, "reply": "started run " + run.ID})
+			return true
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"sessionId": sessionID, "reply": "service tasks run themselves — use the panel to restart."})
+		return true
+	case "code":
+		writeJSON(w, http.StatusOK, map[string]any{"sessionId": sessionID, "reply": "open the right panel and switch to the Code tab (⌘. → Code).", "hint": "code"})
+		return true
+	case "edit":
+		// Hand the rest to the meta-generator as if the user typed it
+		// without the slash. Return false to fall through.
+		// We mutate the message we already persisted is tricky — so
+		// instead we treat this as a real generator turn here.
+		return false
+	}
+	return false
+}
+
+// detectChatHandler scans main.ts source for a `workflow.chatHandler(` call.
+// We strip line comments first so a `// uses workflow.chatHandler` comment
+// doesn't trigger a false positive. Block comments are too rare in
+// practice to worry about here.
+var chatHandlerCall = regexp.MustCompile(`workflow\s*\.\s*chatHandler\s*\(`)
+
+func detectChatHandler(mainTs string) bool {
+	stripped := stripLineComments(mainTs)
+	return chatHandlerCall.MatchString(stripped)
+}
+
+func stripLineComments(s string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(s, "\n") {
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// ensureChatPort adds a `chat` port entry (role="chat") to the task's
+// declared ports when the task has a chat handler. Idempotent — safe to
+// call on every create/update.
+func ensureChatPort(ports []store.TaskPort) []store.TaskPort {
+	for _, p := range ports {
+		if p.Name == "chat" {
+			return ports
+		}
+	}
+	return append(ports, store.TaskPort{Name: "chat", Role: "chat"})
+}
+
+// TaskChat is the programmatic API for invoking a task's chat handler from
+// outside the chat UI (CLI, other tasks, MCP server).
+func (h *Handler) TaskChat(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	t, err := h.Store.GetTask(id)
+	if err != nil || !t.HasChatHandler {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "task is not a chat agent (no workflow.chatHandler)"})
+		return
+	}
+	var body struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Message) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "message required"})
+		return
+	}
+	// Append to session history so the chat panel shows external calls
+	// alongside in-app conversation.
+	_, _ = h.Store.AppendMessage(id, "user", body.Message, map[string]any{"external": true})
+	h.routeChatToTaskHandler(w, t, id, body.Message)
 }
 
 func translatePorts(in []generator.Port) []store.TaskPort {

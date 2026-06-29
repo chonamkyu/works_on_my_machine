@@ -85,7 +85,7 @@ func (m *Memory) Seed(ctx context.Context) {
 
 // --- tasks ------------------------------------------------------------
 
-const taskColumns = `id, user_id, name, description, status, triggers, capabilities, model_config, kind, ports, created_at, updated_at`
+const taskColumns = `id, user_id, name, description, status, triggers, capabilities, model_config, kind, ports, has_chat_handler, created_at, updated_at`
 
 func (m *Memory) ListTasks(userID string) []*Task {
 	ctx := context.Background()
@@ -171,11 +171,11 @@ func (m *Memory) insertTask(ctx context.Context, t *Task) error {
 		kind = "oneshot"
 	}
 	_, err := m.pool.Exec(ctx, `
-		INSERT INTO tasks (id, user_id, name, description, status, triggers, capabilities, model_config, kind, ports, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		INSERT INTO tasks (id, user_id, name, description, status, triggers, capabilities, model_config, kind, ports, has_chat_handler, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (id) DO NOTHING`,
 		t.ID, t.UserID, t.Name, t.Description, t.Status,
-		triggersJSON, capsJSON, modelJSON, kind, portsJSON, t.CreatedAt, t.UpdatedAt)
+		triggersJSON, capsJSON, modelJSON, kind, portsJSON, t.HasChatHandler, t.CreatedAt, t.UpdatedAt)
 	return err
 }
 
@@ -195,9 +195,9 @@ func (m *Memory) UpdateTask(id string, mutate func(*Task)) (*Task, error) {
 		kind = "oneshot"
 	}
 	_, err = m.pool.Exec(context.Background(), `
-		UPDATE tasks SET name=$1, description=$2, status=$3, triggers=$4, capabilities=$5, model_config=$6, kind=$7, ports=$8, updated_at=$9
-		WHERE id=$10`,
-		t.Name, t.Description, t.Status, triggersJSON, capsJSON, modelJSON, kind, portsJSON, t.UpdatedAt, id)
+		UPDATE tasks SET name=$1, description=$2, status=$3, triggers=$4, capabilities=$5, model_config=$6, kind=$7, ports=$8, has_chat_handler=$9, updated_at=$10
+		WHERE id=$11`,
+		t.Name, t.Description, t.Status, triggersJSON, capsJSON, modelJSON, kind, portsJSON, t.HasChatHandler, t.UpdatedAt, id)
 	return t, err
 }
 
@@ -563,7 +563,7 @@ func scanTask(rows pgx.Rows) (*Task, error) {
 func scanTaskScanner(s rowScanner) (*Task, error) {
 	var t Task
 	var triggersJSON, capsJSON, modelJSON, portsJSON []byte
-	if err := s.Scan(&t.ID, &t.UserID, &t.Name, &t.Description, &t.Status, &triggersJSON, &capsJSON, &modelJSON, &t.Kind, &portsJSON, &t.CreatedAt, &t.UpdatedAt); err != nil {
+	if err := s.Scan(&t.ID, &t.UserID, &t.Name, &t.Description, &t.Status, &triggersJSON, &capsJSON, &modelJSON, &t.Kind, &portsJSON, &t.HasChatHandler, &t.CreatedAt, &t.UpdatedAt); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal(triggersJSON, &t.Triggers)

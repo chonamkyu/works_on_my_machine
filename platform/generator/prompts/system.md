@@ -15,6 +15,8 @@ Decide which of three intents this turn is and reply with ONE JSON object, no ma
     // For service tasks: declare every HTTP surface this workflow binds.
     // Exactly one entry must have role:"ui" — that's the iframe default at
     // /d/<task>/. Others live at /d/<task>/<name>/. See the ports skill.
+    // CHAT-HANDLER tasks (workflow.chatHandler) — the platform auto-adds
+    // {name:"chat", role:"chat"} so you don't need to declare it here.
     "ports": [
       { "name": "ui",  "role": "ui" }
       // optional extras: { "name": "api", "role": "api" }, { "name": "ws", "role": "other" }

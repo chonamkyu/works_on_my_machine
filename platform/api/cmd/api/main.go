@@ -252,6 +252,7 @@ func main() {
 		r.Get("/users/{id}/activity", h.ActivityStream)
 
 		r.Post("/chat/{sessionId}/messages", h.ChatMessage)
+		r.Post("/tasks/{id}/chat", h.TaskChat)
 		r.Get("/chat/{sessionId}/messages", h.ListChatMessages)
 		r.Get("/sessions", h.ListSessions)
 		r.Post("/sessions", h.CreateSession)
