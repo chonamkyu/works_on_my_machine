@@ -18,17 +18,18 @@ const (
 )
 
 type MemoryEntry struct {
-	ID        string      `json:"id"`
-	UserID    string      `json:"userId"`
-	Scope     MemoryScope `json:"scope"`
-	ScopeKey  string      `json:"scopeKey"`
-	Topic     string      `json:"topic"`
-	Content   string      `json:"content"`
-	Embedding []float32   `json:"-"`
-	Pinned    bool        `json:"pinned"`
-	SourceRun string      `json:"sourceRunId,omitempty"`
-	CreatedAt time.Time   `json:"createdAt"`
-	UpdatedAt time.Time   `json:"updatedAt"`
+	ID          string      `json:"id"`
+	UserID      string      `json:"userId"`
+	WorkspaceID string      `json:"workspaceId"`
+	Scope       MemoryScope `json:"scope"`
+	ScopeKey    string      `json:"scopeKey"`
+	Topic       string      `json:"topic"`
+	Content     string      `json:"content"`
+	Embedding   []float32   `json:"-"`
+	Pinned      bool        `json:"pinned"`
+	SourceRun   string      `json:"sourceRunId,omitempty"`
+	CreatedAt   time.Time   `json:"createdAt"`
+	UpdatedAt   time.Time   `json:"updatedAt"`
 }
 
 // MemoryStore is the user/task scoped memory backed by pgvector.
@@ -74,16 +75,20 @@ func (m *MemoryStore) Write(e *MemoryEntry) *MemoryEntry {
 		embeddingArg = v
 	}
 
+	wsID := e.WorkspaceID
+	if wsID == "" {
+		wsID = e.UserID // backward-compat fallback
+	}
 	_, _ = m.pool.Exec(ctx, `
-		INSERT INTO memory_entries (id, user_id, scope, scope_key, topic, content, embedding, pinned, source_run_id, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		INSERT INTO memory_entries (id, user_id, workspace_id, scope, scope_key, topic, content, embedding, pinned, source_run_id, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		ON CONFLICT (id) DO UPDATE SET
 			topic=EXCLUDED.topic,
 			content=EXCLUDED.content,
 			embedding=EXCLUDED.embedding,
 			pinned=EXCLUDED.pinned,
 			updated_at=EXCLUDED.updated_at`,
-		e.ID, e.UserID, string(e.Scope), e.ScopeKey, e.Topic, e.Content,
+		e.ID, e.UserID, wsID, string(e.Scope), e.ScopeKey, e.Topic, e.Content,
 		embeddingArg, e.Pinned, nullableString(e.SourceRun), e.CreatedAt, e.UpdatedAt)
 	return e
 }
@@ -119,12 +124,12 @@ func (m *MemoryStore) Update(id string, mutate func(*MemoryEntry)) (*MemoryEntry
 
 func (m *MemoryStore) get(ctx context.Context, id string) (*MemoryEntry, error) {
 	row := m.pool.QueryRow(ctx, `
-		SELECT id, user_id, scope, scope_key, topic, content, pinned, source_run_id, created_at, updated_at
+		SELECT id, user_id, workspace_id, scope, scope_key, topic, content, pinned, source_run_id, created_at, updated_at
 		FROM memory_entries WHERE id=$1`, id)
 	var e MemoryEntry
 	var scope string
 	var src *string
-	if err := row.Scan(&e.ID, &e.UserID, &scope, &e.ScopeKey, &e.Topic, &e.Content, &e.Pinned, &src, &e.CreatedAt, &e.UpdatedAt); err != nil {
+	if err := row.Scan(&e.ID, &e.UserID, &e.WorkspaceID, &scope, &e.ScopeKey, &e.Topic, &e.Content, &e.Pinned, &src, &e.CreatedAt, &e.UpdatedAt); err != nil {
 		return nil, err
 	}
 	e.Scope = MemoryScope(scope)
@@ -134,10 +139,10 @@ func (m *MemoryStore) get(ctx context.Context, id string) (*MemoryEntry, error) 
 	return &e, nil
 }
 
-func (m *MemoryStore) List(userID string, scope MemoryScope, scopeKey string) []*MemoryEntry {
-	q := `SELECT id, user_id, scope, scope_key, topic, content, pinned, source_run_id, created_at, updated_at
-		FROM memory_entries WHERE user_id=$1 AND archived_at IS NULL`
-	args := []any{userID}
+func (m *MemoryStore) List(workspaceID string, scope MemoryScope, scopeKey string) []*MemoryEntry {
+	q := `SELECT id, user_id, workspace_id, scope, scope_key, topic, content, pinned, source_run_id, created_at, updated_at
+		FROM memory_entries WHERE workspace_id=$1 AND archived_at IS NULL`
+	args := []any{workspaceID}
 	if scope != "" {
 		q += ` AND scope=$2`
 		args = append(args, string(scope))
@@ -157,7 +162,7 @@ func (m *MemoryStore) List(userID string, scope MemoryScope, scopeKey string) []
 		var e MemoryEntry
 		var sc string
 		var src *string
-		if err := rows.Scan(&e.ID, &e.UserID, &sc, &e.ScopeKey, &e.Topic, &e.Content, &e.Pinned, &src, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.UserID, &e.WorkspaceID, &sc, &e.ScopeKey, &e.Topic, &e.Content, &e.Pinned, &src, &e.CreatedAt, &e.UpdatedAt); err != nil {
 			continue
 		}
 		e.Scope = MemoryScope(sc)
@@ -172,7 +177,7 @@ func (m *MemoryStore) List(userID string, scope MemoryScope, scopeKey string) []
 // Search runs a hybrid query: vector similarity (if embeddings available)
 // combined with pg_trgm content similarity. topK results return blended by
 // 0.6 vector + 0.4 lexical.
-func (m *MemoryStore) Search(userID, query string, topK int) []*MemoryEntry {
+func (m *MemoryStore) Search(workspaceID, query string, topK int) []*MemoryEntry {
 	if topK <= 0 {
 		topK = 10
 	}
@@ -188,12 +193,12 @@ func (m *MemoryStore) Search(userID, query string, topK int) []*MemoryEntry {
 
 	if queryVec != nil {
 		rows, err := m.pool.Query(ctx, `
-			SELECT id, user_id, scope, scope_key, topic, content, pinned, source_run_id, created_at, updated_at,
+			SELECT id, user_id, workspace_id, scope, scope_key, topic, content, pinned, source_run_id, created_at, updated_at,
 			       (0.6 * (1 - (embedding <=> $1)) + 0.4 * similarity(content, $2)) AS rank
 			FROM memory_entries
-			WHERE user_id=$3 AND embedding IS NOT NULL AND archived_at IS NULL
+			WHERE workspace_id=$3 AND embedding IS NOT NULL AND archived_at IS NULL
 			ORDER BY rank DESC
-			LIMIT $4`, queryVec, query, userID, topK)
+			LIMIT $4`, queryVec, query, workspaceID, topK)
 		if err == nil {
 			defer rows.Close()
 			return collectMemoryWithRank(rows)
@@ -201,12 +206,12 @@ func (m *MemoryStore) Search(userID, query string, topK int) []*MemoryEntry {
 	}
 	// Lexical-only fallback.
 	rows, err := m.pool.Query(ctx, `
-		SELECT id, user_id, scope, scope_key, topic, content, pinned, source_run_id, created_at, updated_at,
+		SELECT id, user_id, workspace_id, scope, scope_key, topic, content, pinned, source_run_id, created_at, updated_at,
 		       similarity(content, $1) AS rank
 		FROM memory_entries
-		WHERE user_id=$2 AND content % $1 AND archived_at IS NULL
+		WHERE workspace_id=$2 AND content % $1 AND archived_at IS NULL
 		ORDER BY rank DESC
-		LIMIT $3`, query, userID, topK)
+		LIMIT $3`, query, workspaceID, topK)
 	if err != nil {
 		return nil
 	}
@@ -220,7 +225,7 @@ func (m *MemoryStore) Search(userID, query string, topK int) []*MemoryEntry {
 //   2. last_read_at older than staleDays
 //   3. created > maxAgeDays AND read_count <= rarelyReadThreshold
 // Pinned entries are NEVER archived. Returns the number of rows archived.
-func (m *MemoryStore) PruneStale(userID string, maxAgeDays, staleDays, rarelyReadThreshold int) (int, error) {
+func (m *MemoryStore) PruneStale(workspaceID string, maxAgeDays, staleDays, rarelyReadThreshold int) (int, error) {
 	if maxAgeDays <= 0 {
 		maxAgeDays = 90
 	}
@@ -230,7 +235,7 @@ func (m *MemoryStore) PruneStale(userID string, maxAgeDays, staleDays, rarelyRea
 	tag, err := m.pool.Exec(context.Background(), `
 		UPDATE memory_entries
 		SET archived_at = now()
-		WHERE user_id = $1
+		WHERE workspace_id = $1
 		  AND archived_at IS NULL
 		  AND pinned = false
 		  AND (
@@ -238,7 +243,7 @@ func (m *MemoryStore) PruneStale(userID string, maxAgeDays, staleDays, rarelyRea
 		    OR (last_read_at IS NOT NULL AND last_read_at < now() - make_interval(days => $3))
 		    OR (created_at < now() - make_interval(days => $2) AND read_count <= $4)
 		  )`,
-		userID, maxAgeDays, staleDays, rarelyReadThreshold)
+		workspaceID, maxAgeDays, staleDays, rarelyReadThreshold)
 	if err != nil {
 		return 0, err
 	}
@@ -254,7 +259,7 @@ type PruneStats struct {
 	Active   int
 }
 
-func (m *MemoryStore) Stats(userID string) PruneStats {
+func (m *MemoryStore) Stats(workspaceID string) PruneStats {
 	var s PruneStats
 	row := m.pool.QueryRow(context.Background(), `
 		SELECT
@@ -262,7 +267,7 @@ func (m *MemoryStore) Stats(userID string) PruneStats {
 		  count(*) FILTER (WHERE pinned = true),
 		  count(*) FILTER (WHERE archived_at IS NOT NULL),
 		  count(*) FILTER (WHERE archived_at IS NULL)
-		FROM memory_entries WHERE user_id = $1`, userID)
+		FROM memory_entries WHERE workspace_id = $1`, workspaceID)
 	_ = row.Scan(&s.Total, &s.Pinned, &s.Archived, &s.Active)
 	return s
 }
@@ -274,7 +279,7 @@ func collectMemoryWithRank(rows pgx.Rows) []*MemoryEntry {
 		var sc string
 		var src *string
 		var rank float64
-		if err := rows.Scan(&e.ID, &e.UserID, &sc, &e.ScopeKey, &e.Topic, &e.Content, &e.Pinned, &src, &e.CreatedAt, &e.UpdatedAt, &rank); err != nil {
+		if err := rows.Scan(&e.ID, &e.UserID, &e.WorkspaceID, &sc, &e.ScopeKey, &e.Topic, &e.Content, &e.Pinned, &src, &e.CreatedAt, &e.UpdatedAt, &rank); err != nil {
 			continue
 		}
 		e.Scope = MemoryScope(sc)
@@ -282,6 +287,24 @@ func collectMemoryWithRank(rows pgx.Rows) []*MemoryEntry {
 			e.SourceRun = *src
 		}
 		out = append(out, &e)
+	}
+	return out
+}
+
+// ListAllWorkspaceIDs returns distinct workspace IDs that have memory entries.
+// Used by the pruner to iterate all workspaces without knowing them upfront.
+func (m *MemoryStore) ListAllWorkspaceIDs() []string {
+	rows, err := m.pool.Query(context.Background(), `SELECT DISTINCT workspace_id FROM memory_entries WHERE archived_at IS NULL`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil && id != "" {
+			out = append(out, id)
+		}
 	}
 	return out
 }

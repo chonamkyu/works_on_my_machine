@@ -18,16 +18,17 @@ import (
 )
 
 type Credential struct {
-	ID         string         `json:"id"`
-	UserID     string         `json:"userId"`
-	Connector  string         `json:"connector"`
-	Label      string         `json:"label"`
-	Secret     string         `json:"-"` // legacy: raw secret value (plain string)
-	Value      map[string]any `json:"-"` // new: arbitrary JSON payload (auth bag)
-	Scopes     []string       `json:"scopes"`
-	Status     string         `json:"status"`
-	LastUsedAt *time.Time     `json:"lastUsedAt,omitempty"`
-	CreatedAt  time.Time      `json:"createdAt"`
+	ID          string         `json:"id"`
+	UserID      string         `json:"userId"`
+	WorkspaceID string         `json:"workspaceId"`
+	Connector   string         `json:"connector"`
+	Label       string         `json:"label"`
+	Secret      string         `json:"-"` // legacy: raw secret value (plain string)
+	Value       map[string]any `json:"-"` // new: arbitrary JSON payload (auth bag)
+	Scopes      []string       `json:"scopes"`
+	Status      string         `json:"status"`
+	LastUsedAt  *time.Time     `json:"lastUsedAt,omitempty"`
+	CreatedAt   time.Time      `json:"createdAt"`
 }
 
 type CredentialStore struct {
@@ -105,19 +106,23 @@ func (s *CredentialStore) Upsert(c *Credential) (*Credential, error) {
 	if scopes == nil {
 		scopes = []string{}
 	}
+	wsID := c.WorkspaceID
+	if wsID == "" {
+		wsID = c.UserID // backward-compat fallback
+	}
 	_, err = s.pool.Exec(context.Background(), `
-		INSERT INTO credentials (id, user_id, connector, label, encrypted, scopes, status, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		INSERT INTO credentials (id, user_id, workspace_id, connector, label, encrypted, scopes, status, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		ON CONFLICT (user_id, connector, label)
 		DO UPDATE SET encrypted=EXCLUDED.encrypted, scopes=EXCLUDED.scopes, status=EXCLUDED.status`,
-		c.ID, c.UserID, c.Connector, c.Label, enc, scopes, c.Status, c.CreatedAt)
+		c.ID, c.UserID, wsID, c.Connector, c.Label, enc, scopes, c.Status, c.CreatedAt)
 	return c, err
 }
 
-func (s *CredentialStore) List(userID string) []*Credential {
+func (s *CredentialStore) List(workspaceID string) []*Credential {
 	rows, err := s.pool.Query(context.Background(), `
-		SELECT id, user_id, connector, label, scopes, status, last_used_at, created_at
-		FROM credentials WHERE user_id=$1 ORDER BY connector, label`, userID)
+		SELECT id, user_id, workspace_id, connector, label, scopes, status, last_used_at, created_at
+		FROM credentials WHERE workspace_id=$1 ORDER BY connector, label`, workspaceID)
 	if err != nil {
 		return nil
 	}
@@ -125,7 +130,7 @@ func (s *CredentialStore) List(userID string) []*Credential {
 	var out []*Credential
 	for rows.Next() {
 		var c Credential
-		if err := rows.Scan(&c.ID, &c.UserID, &c.Connector, &c.Label, &c.Scopes, &c.Status, &c.LastUsedAt, &c.CreatedAt); err == nil {
+		if err := rows.Scan(&c.ID, &c.UserID, &c.WorkspaceID, &c.Connector, &c.Label, &c.Scopes, &c.Status, &c.LastUsedAt, &c.CreatedAt); err == nil {
 			out = append(out, &c)
 		}
 	}
@@ -183,16 +188,16 @@ func (s *CredentialStore) decryptToBytes(cipherbuf []byte) ([]byte, error) {
 
 // Resolve fetches and decrypts a credential, returning (primary string, full
 // JSON payload). Records last_used_at as a side effect.
-func (s *CredentialStore) Resolve(userID, connector, label string) (string, error) {
-	primary, _, err := s.ResolveFull(userID, connector, label)
+func (s *CredentialStore) Resolve(workspaceID, connector, label string) (string, error) {
+	primary, _, err := s.ResolveFull(workspaceID, connector, label)
 	return primary, err
 }
 
-func (s *CredentialStore) ResolveFull(userID, connector, label string) (string, map[string]any, error) {
+func (s *CredentialStore) ResolveFull(workspaceID, connector, label string) (string, map[string]any, error) {
 	row := s.pool.QueryRow(context.Background(), `
 		SELECT encrypted FROM credentials
-		WHERE user_id=$1 AND connector=$2 AND label=$3 AND status='active'`,
-		userID, connector, label)
+		WHERE workspace_id=$1 AND connector=$2 AND label=$3 AND status='active'`,
+		workspaceID, connector, label)
 	var enc []byte
 	if err := row.Scan(&enc); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -202,24 +207,24 @@ func (s *CredentialStore) ResolveFull(userID, connector, label string) (string, 
 	}
 	_, _ = s.pool.Exec(context.Background(), `
 		UPDATE credentials SET last_used_at=NOW()
-		WHERE user_id=$1 AND connector=$2 AND label=$3`, userID, connector, label)
+		WHERE workspace_id=$1 AND connector=$2 AND label=$3`, workspaceID, connector, label)
 	val, primary, err := s.decode(enc)
 	return primary, val, err
 }
 
 // ResolveDefault picks the first active credential for the connector when
 // the task did not pin a specific label.
-func (s *CredentialStore) ResolveDefault(userID, connector string) (string, string, error) {
-	label, _, primary, err := s.ResolveDefaultFull(userID, connector)
+func (s *CredentialStore) ResolveDefault(workspaceID, connector string) (string, string, error) {
+	label, _, primary, err := s.ResolveDefaultFull(workspaceID, connector)
 	return label, primary, err
 }
 
-func (s *CredentialStore) ResolveDefaultFull(userID, connector string) (string, map[string]any, string, error) {
+func (s *CredentialStore) ResolveDefaultFull(workspaceID, connector string) (string, map[string]any, string, error) {
 	row := s.pool.QueryRow(context.Background(), `
 		SELECT label, encrypted FROM credentials
-		WHERE user_id=$1 AND connector=$2 AND status='active'
+		WHERE workspace_id=$1 AND connector=$2 AND status='active'
 		ORDER BY last_used_at DESC NULLS LAST, created_at DESC
-		LIMIT 1`, userID, connector)
+		LIMIT 1`, workspaceID, connector)
 	var label string
 	var enc []byte
 	if err := row.Scan(&label, &enc); err != nil {

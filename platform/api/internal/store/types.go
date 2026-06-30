@@ -9,6 +9,10 @@ var ErrNotFound = errors.New("not found")
 
 const DefaultUserID = "u_local"
 
+// GlobalScope is used by background processes (skill evolver, etc.) that are
+// not scoped to a specific user workspace.
+const GlobalScope = "_global"
+
 type RunState string
 
 const (
@@ -35,9 +39,10 @@ type ModelConfig struct {
 }
 
 type Task struct {
-	ID           string      `json:"id"`
-	UserID       string      `json:"userId"`
-	Name         string      `json:"name"`
+	ID          string      `json:"id"`
+	UserID      string      `json:"userId"`
+	WorkspaceID string      `json:"workspaceId"`
+	Name        string      `json:"name"`
 	Description  string      `json:"description"`
 	Status       string      `json:"status"`
 	Triggers     []Trigger   `json:"triggers"`
@@ -74,10 +79,11 @@ type TaskPort struct {
 }
 
 type Run struct {
-	ID         string     `json:"id"`
-	TaskID     string     `json:"taskId"`
-	UserID     string     `json:"userId"`
-	State      RunState   `json:"state"`
+	ID          string     `json:"id"`
+	TaskID      string     `json:"taskId"`
+	UserID      string     `json:"userId"`
+	WorkspaceID string     `json:"workspaceId"`
+	State       RunState   `json:"state"`
 	Trigger    string     `json:"trigger"`
 	StartedAt  *time.Time `json:"startedAt,omitempty"`
 	FinishedAt *time.Time `json:"finishedAt,omitempty"`
@@ -94,9 +100,10 @@ type LogLine struct {
 }
 
 type Session struct {
-	ID           string     `json:"id"`
-	UserID       string     `json:"userId"`
-	Title        string     `json:"title"`
+	ID          string     `json:"id"`
+	UserID      string     `json:"userId"`
+	WorkspaceID string     `json:"workspaceId"`
+	Title       string     `json:"title"`
 	PinnedTasks  []string   `json:"pinnedTasks"`
 	ModelID      string     `json:"modelId,omitempty"`
 	MessageCount int        `json:"messageCount"`

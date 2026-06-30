@@ -38,11 +38,11 @@ type ProfileSuggestion struct {
 	ResolvedAt *time.Time `json:"resolvedAt,omitempty"`
 }
 
-func (m *Memory) GetUserProfile(userID string) (*UserProfile, error) {
+func (m *Memory) GetUserProfile(workspaceID string) (*UserProfile, error) {
 	row := m.pool.QueryRow(context.Background(), `
 		SELECT user_id, preferred_language, reply_tone, expertise_level,
 		       hard_rules, default_repos, default_channels, default_models, updated_at
-		FROM user_profile WHERE user_id=$1`, userID)
+		FROM user_profile WHERE workspace_id=$1`, workspaceID)
 	var p UserProfile
 	var hardJSON, reposJSON, channelsJSON, modelsJSON []byte
 	if err := row.Scan(&p.UserID, &p.PreferredLanguage, &p.ReplyTone, &p.ExpertiseLevel,
@@ -65,9 +65,9 @@ func (m *Memory) UpsertUserProfile(p *UserProfile) error {
 	channels, _ := json.Marshal(orEmpty(p.DefaultChannels))
 	models, _ := json.Marshal(orEmptyMap(p.DefaultModels))
 	_, err := m.pool.Exec(context.Background(), `
-		INSERT INTO user_profile (user_id, preferred_language, reply_tone, expertise_level,
+		INSERT INTO user_profile (user_id, workspace_id, preferred_language, reply_tone, expertise_level,
 			hard_rules, default_repos, default_channels, default_models, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now())
+		VALUES ($1,$1,$2,$3,$4,$5,$6,$7,$8, now())
 		ON CONFLICT (user_id) DO UPDATE SET
 		  preferred_language=EXCLUDED.preferred_language,
 		  reply_tone=EXCLUDED.reply_tone,
@@ -82,31 +82,31 @@ func (m *Memory) UpsertUserProfile(p *UserProfile) error {
 	return err
 }
 
-func (m *Memory) AppendProfileSuggestion(userID, field, value, sessionID string) error {
-	if userID == "" || field == "" || value == "" {
+func (m *Memory) AppendProfileSuggestion(workspaceID, field, value, sessionID string) error {
+	if workspaceID == "" || field == "" || value == "" {
 		return nil
 	}
 	// De-duplicate: if a pending suggestion for the same field+value already
 	// exists, leave it alone.
 	var existing int
 	_ = m.pool.QueryRow(context.Background(),
-		`SELECT count(*) FROM user_profile_suggestions WHERE user_id=$1 AND field=$2 AND value=$3 AND status='pending'`,
-		userID, field, value).Scan(&existing)
+		`SELECT count(*) FROM user_profile_suggestions WHERE workspace_id=$1 AND field=$2 AND value=$3 AND status='pending'`,
+		workspaceID, field, value).Scan(&existing)
 	if existing > 0 {
 		return nil
 	}
 	id := "ps_" + randID()
 	_, err := m.pool.Exec(context.Background(), `
-		INSERT INTO user_profile_suggestions (id, user_id, field, value, source, session_id)
-		VALUES ($1,$2,$3,$4,'chat-reflect',$5)`,
-		id, userID, field, value, nullableString(sessionID))
+		INSERT INTO user_profile_suggestions (id, user_id, workspace_id, field, value, source, session_id)
+		VALUES ($1,$2,$2,$3,$4,'chat-reflect',$5)`,
+		id, workspaceID, field, value, nullableString(sessionID))
 	return err
 }
 
-func (m *Memory) ListProfileSuggestions(userID, status string) []*ProfileSuggestion {
+func (m *Memory) ListProfileSuggestions(workspaceID, status string) []*ProfileSuggestion {
 	q := `SELECT id, user_id, field, value, source, session_id, status, created_at, resolved_at
-		FROM user_profile_suggestions WHERE user_id=$1`
-	args := []any{userID}
+		FROM user_profile_suggestions WHERE workspace_id=$1`
+	args := []any{workspaceID}
 	if status != "" {
 		q += ` AND status=$2`
 		args = append(args, status)

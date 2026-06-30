@@ -11,6 +11,7 @@ import (
 type SkillProposal struct {
 	ID          string     `json:"id"`
 	UserID      string     `json:"userId"`
+	WorkspaceID string     `json:"workspaceId"`
 	SkillName   string     `json:"skillName"`
 	SkillBody   string     `json:"skillBody"`
 	Rationale   string     `json:"rationale"`
@@ -34,17 +35,21 @@ func (m *Memory) CreateSkillProposal(p *SkillProposal) (*SkillProposal, error) {
 	if p.Confidence == "" {
 		p.Confidence = "medium"
 	}
+	wsID := p.WorkspaceID
+	if wsID == "" {
+		wsID = p.UserID // backward-compat fallback
+	}
 	_, err := m.pool.Exec(context.Background(), `
-		INSERT INTO skill_proposals (id, user_id, skill_name, skill_body, rationale, confidence, applies_when, status)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-		p.ID, p.UserID, p.SkillName, p.SkillBody, p.Rationale, p.Confidence, p.AppliesWhen, p.Status)
+		INSERT INTO skill_proposals (id, user_id, workspace_id, skill_name, skill_body, rationale, confidence, applies_when, status)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		p.ID, p.UserID, wsID, p.SkillName, p.SkillBody, p.Rationale, p.Confidence, p.AppliesWhen, p.Status)
 	return p, err
 }
 
-func (m *Memory) ListSkillProposals(userID, status string) []*SkillProposal {
+func (m *Memory) ListSkillProposals(workspaceID, status string) []*SkillProposal {
 	q := `SELECT id, user_id, skill_name, skill_body, rationale, confidence, applies_when, status, created_at, resolved_at
-		FROM skill_proposals WHERE user_id=$1`
-	args := []any{userID}
+		FROM skill_proposals WHERE workspace_id=$1`
+	args := []any{workspaceID}
 	if status != "" {
 		q += ` AND status=$2`
 		args = append(args, status)

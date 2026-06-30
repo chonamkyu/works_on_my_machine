@@ -25,16 +25,17 @@ func NewMemory(pool *pgxpool.Pool) *Memory {
 // Seed inserts a tiny default set if the user has no tasks yet — useful for
 // the first-run experience. The default session row is always ensured so
 // chat history can be persisted from the very first message.
-func (m *Memory) Seed(ctx context.Context) {
+func (m *Memory) Seed(ctx context.Context, workspaceID string) {
 	// Always ensure the default session exists (idempotent upsert).
 	_ = m.upsertSession(ctx, &Session{
-		ID:        "sess_default",
-		UserID:    DefaultUserID,
-		Title:     "Welcome",
-		LastMsgAt: time.Now(),
+		ID:          "sess_default",
+		UserID:      workspaceID,
+		WorkspaceID: workspaceID,
+		Title:       "Welcome",
+		LastMsgAt:   time.Now(),
 	})
 
-	row := m.pool.QueryRow(ctx, `SELECT count(*) FROM tasks WHERE user_id=$1`, DefaultUserID)
+	row := m.pool.QueryRow(ctx, `SELECT count(*) FROM tasks WHERE workspace_id=$1`, workspaceID)
 	var n int
 	_ = row.Scan(&n)
 	if n > 0 {
@@ -43,7 +44,8 @@ func (m *Memory) Seed(ctx context.Context) {
 	seed := []*Task{
 		{
 			ID:          "tsk_seed_daily_bugs",
-			UserID:      DefaultUserID,
+			UserID:      workspaceID,
+			WorkspaceID: workspaceID,
 			Name:        "daily-bugs",
 			Description: "Summarize new GitHub bug issues to Slack at 9am.",
 			Status:      "scheduled",
@@ -55,7 +57,8 @@ func (m *Memory) Seed(ctx context.Context) {
 		},
 		{
 			ID:          "tsk_seed_pr_review",
-			UserID:      DefaultUserID,
+			UserID:      workspaceID,
+			WorkspaceID: workspaceID,
 			Name:        "pr-review",
 			Description: "Auto-comment a checklist on new PRs.",
 			Status:      "idle",
@@ -64,7 +67,8 @@ func (m *Memory) Seed(ctx context.Context) {
 		},
 		{
 			ID:          "tsk_seed_memo_sync",
-			UserID:      DefaultUserID,
+			UserID:      workspaceID,
+			WorkspaceID: workspaceID,
 			Name:        "memo-sync",
 			Description: "Mirror Notion notes tagged #share to Slack #notes.",
 			Status:      "idle",
@@ -76,22 +80,45 @@ func (m *Memory) Seed(ctx context.Context) {
 		_ = m.insertTask(ctx, t)
 	}
 	_ = m.upsertSession(ctx, &Session{
-		ID:        "sess_default",
-		UserID:    DefaultUserID,
-		Title:     "Welcome",
-		LastMsgAt: time.Now(),
+		ID:          "sess_default",
+		UserID:      workspaceID,
+		WorkspaceID: workspaceID,
+		Title:       "Welcome",
+		LastMsgAt:   time.Now(),
 	})
 }
 
 // --- tasks ------------------------------------------------------------
 
-const taskColumns = `id, user_id, name, description, status, triggers, capabilities, model_config, kind, ports, has_chat_handler, created_at, updated_at`
+const taskColumns = `id, user_id, workspace_id, name, description, status, triggers, capabilities, model_config, kind, ports, has_chat_handler, created_at, updated_at`
 
-func (m *Memory) ListTasks(userID string) []*Task {
+func (m *Memory) ListTasks(workspaceID string) []*Task {
 	ctx := context.Background()
 	rows, err := m.pool.Query(ctx, `
 		SELECT `+taskColumns+`
-		FROM tasks WHERE user_id=$1 ORDER BY created_at ASC`, userID)
+		FROM tasks WHERE workspace_id=$1 ORDER BY created_at ASC`, workspaceID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []*Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// ListAllTasks returns all tasks regardless of workspace. Used by the cron
+// scheduler which fires triggers globally.
+func (m *Memory) ListAllTasks() []*Task {
+	ctx := context.Background()
+	rows, err := m.pool.Query(ctx, `
+		SELECT `+taskColumns+`
+		FROM tasks ORDER BY created_at ASC`)
 	if err != nil {
 		return nil
 	}
@@ -153,10 +180,11 @@ func (m *Memory) CreateTask(t *Task) *Task {
 	// Every task gets a 1:1 chat session keyed by task id — that session is
 	// the conversation history for working on this task.
 	_ = m.upsertSession(context.Background(), &Session{
-		ID:        t.ID,
-		UserID:    t.UserID,
-		Title:     t.Name,
-		LastMsgAt: now,
+		ID:          t.ID,
+		UserID:      t.UserID,
+		WorkspaceID: t.WorkspaceID,
+		Title:       t.Name,
+		LastMsgAt:   now,
 	})
 	return t
 }
@@ -171,10 +199,10 @@ func (m *Memory) insertTask(ctx context.Context, t *Task) error {
 		kind = "oneshot"
 	}
 	_, err := m.pool.Exec(ctx, `
-		INSERT INTO tasks (id, user_id, name, description, status, triggers, capabilities, model_config, kind, ports, has_chat_handler, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		INSERT INTO tasks (id, user_id, workspace_id, name, description, status, triggers, capabilities, model_config, kind, ports, has_chat_handler, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		ON CONFLICT (id) DO NOTHING`,
-		t.ID, t.UserID, t.Name, t.Description, t.Status,
+		t.ID, t.UserID, t.WorkspaceID, t.Name, t.Description, t.Status,
 		triggersJSON, capsJSON, modelJSON, kind, portsJSON, t.HasChatHandler, t.CreatedAt, t.UpdatedAt)
 	return err
 }
@@ -275,21 +303,21 @@ func (m *Memory) ArchiveTask(t *Task, files map[string]string) error {
 		kind = "oneshot"
 	}
 	_, err := m.pool.Exec(context.Background(), `
-		INSERT INTO task_archive (id, user_id, name, description, kind, triggers, capabilities, model_config, files, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		INSERT INTO task_archive (id, user_id, workspace_id, name, description, kind, triggers, capabilities, model_config, files, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		ON CONFLICT (id) DO UPDATE SET
 		  name=EXCLUDED.name, description=EXCLUDED.description, kind=EXCLUDED.kind,
 		  triggers=EXCLUDED.triggers, capabilities=EXCLUDED.capabilities,
 		  model_config=EXCLUDED.model_config, files=EXCLUDED.files,
 		  deleted_at=now()`,
-		t.ID, t.UserID, t.Name, t.Description, kind, triggersJSON, capsJSON, modelJSON, filesJSON, t.CreatedAt)
+		t.ID, t.UserID, t.WorkspaceID, t.Name, t.Description, kind, triggersJSON, capsJSON, modelJSON, filesJSON, t.CreatedAt)
 	return err
 }
 
-func (m *Memory) ListArchivedTasks(userID string) []*ArchivedTask {
+func (m *Memory) ListArchivedTasks(workspaceID string) []*ArchivedTask {
 	rows, err := m.pool.Query(context.Background(), `
 		SELECT id, user_id, name, description, kind, triggers, capabilities, model_config, files, created_at, deleted_at
-		FROM task_archive WHERE user_id=$1 ORDER BY deleted_at DESC`, userID)
+		FROM task_archive WHERE workspace_id=$1 ORDER BY deleted_at DESC`, workspaceID)
 	if err != nil {
 		return nil
 	}
@@ -334,22 +362,28 @@ func (m *Memory) GetArchivedTask(id string) (*ArchivedTask, error) {
 // --- runs -------------------------------------------------------------
 
 func (m *Memory) CreateRun(taskID, trigger string) *Run {
+	task, _ := m.GetTask(taskID)
+	wsID := ""
+	if task != nil {
+		wsID = task.WorkspaceID
+	}
 	r := &Run{
-		ID:      "run_" + randID(),
-		TaskID:  taskID,
-		UserID:  DefaultUserID, // single-user dev mode
-		State:   RunQueued,
-		Trigger: trigger,
+		ID:          "run_" + randID(),
+		TaskID:      taskID,
+		UserID:      wsID,
+		WorkspaceID: wsID,
+		State:       RunQueued,
+		Trigger:     trigger,
 	}
 	_, _ = m.pool.Exec(context.Background(), `
-		INSERT INTO runs (id, task_id, user_id, state, trigger) VALUES ($1,$2,$3,$4,$5)`,
-		r.ID, r.TaskID, r.UserID, r.State, r.Trigger)
+		INSERT INTO runs (id, task_id, user_id, workspace_id, state, trigger) VALUES ($1,$2,$3,$4,$5,$6)`,
+		r.ID, r.TaskID, r.UserID, r.WorkspaceID, r.State, r.Trigger)
 	return r
 }
 
 func (m *Memory) GetRun(id string) (*Run, error) {
 	row := m.pool.QueryRow(context.Background(), `
-		SELECT id, task_id, user_id, state, trigger, started_at, finished_at, duration_ms, output, error
+		SELECT id, task_id, user_id, workspace_id, state, trigger, started_at, finished_at, duration_ms, output, error
 		FROM runs WHERE id=$1`, id)
 	r, err := scanRunRow(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -382,7 +416,7 @@ func (m *Memory) UpdateRun(id string, mutate func(*Run)) (*Run, error) {
 
 func (m *Memory) ListRunsForTask(taskID string) []*Run {
 	rows, err := m.pool.Query(context.Background(), `
-		SELECT id, task_id, user_id, state, trigger, started_at, finished_at, duration_ms, output, error
+		SELECT id, task_id, user_id, workspace_id, state, trigger, started_at, finished_at, duration_ms, output, error
 		FROM runs WHERE task_id=$1 ORDER BY COALESCE(started_at, NOW()) DESC LIMIT 50`, taskID)
 	if err != nil {
 		return nil
@@ -425,10 +459,10 @@ func (m *Memory) GetLogs(runID string) []LogLine {
 
 // --- sessions / messages ----------------------------------------------
 
-func (m *Memory) ListSessions(userID string) []*Session {
+func (m *Memory) ListSessions(workspaceID string) []*Session {
 	rows, err := m.pool.Query(context.Background(), `
-		SELECT id, user_id, title, pinned_tasks, model_id, message_count, last_msg_at, archived_at, created_at
-		FROM sessions WHERE user_id=$1 AND archived_at IS NULL ORDER BY last_msg_at DESC`, userID)
+		SELECT id, user_id, workspace_id, title, pinned_tasks, model_id, message_count, last_msg_at, archived_at, created_at
+		FROM sessions WHERE workspace_id=$1 AND archived_at IS NULL ORDER BY last_msg_at DESC`, workspaceID)
 	if err != nil {
 		return nil
 	}
@@ -471,10 +505,10 @@ func (m *Memory) upsertSession(ctx context.Context, s *Session) error {
 		lastMsg = created
 	}
 	_, err := m.pool.Exec(ctx, `
-		INSERT INTO sessions (id, user_id, title, pinned_tasks, model_id, last_msg_at, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)
+		INSERT INTO sessions (id, user_id, workspace_id, title, pinned_tasks, model_id, last_msg_at, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 		ON CONFLICT (id) DO UPDATE SET title=EXCLUDED.title, last_msg_at=EXCLUDED.last_msg_at`,
-		s.ID, s.UserID, s.Title, pinned, nullableModel(s.ModelID), lastMsg, created)
+		s.ID, s.UserID, s.WorkspaceID, s.Title, pinned, nullableModel(s.ModelID), lastMsg, created)
 	return err
 }
 
@@ -487,7 +521,7 @@ func nullableModel(s string) any {
 
 func (m *Memory) GetSession(id string) (*Session, error) {
 	row := m.pool.QueryRow(context.Background(), `
-		SELECT id, user_id, title, pinned_tasks, model_id, message_count, last_msg_at, archived_at, created_at
+		SELECT id, user_id, workspace_id, title, pinned_tasks, model_id, message_count, last_msg_at, archived_at, created_at
 		FROM sessions WHERE id=$1`, id)
 	s, err := scanSessionRow(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -501,9 +535,10 @@ func (m *Memory) AppendMessage(sessionID string, role, content string, metadata 
 	// resilient to clients that supply an arbitrary sessionId before any
 	// session has been explicitly created.
 	_ = m.upsertSession(context.Background(), &Session{
-		ID:     sessionID,
-		UserID: DefaultUserID,
-		Title:  "Untitled",
+		ID:          sessionID,
+		UserID:      "",
+		WorkspaceID: "",
+		Title:       "Untitled",
 	})
 	metaJSON, _ := json.Marshal(metadata)
 	row := m.pool.QueryRow(context.Background(), `
@@ -563,7 +598,7 @@ func scanTask(rows pgx.Rows) (*Task, error) {
 func scanTaskScanner(s rowScanner) (*Task, error) {
 	var t Task
 	var triggersJSON, capsJSON, modelJSON, portsJSON []byte
-	if err := s.Scan(&t.ID, &t.UserID, &t.Name, &t.Description, &t.Status, &triggersJSON, &capsJSON, &modelJSON, &t.Kind, &portsJSON, &t.HasChatHandler, &t.CreatedAt, &t.UpdatedAt); err != nil {
+	if err := s.Scan(&t.ID, &t.UserID, &t.WorkspaceID, &t.Name, &t.Description, &t.Status, &triggersJSON, &capsJSON, &modelJSON, &t.Kind, &portsJSON, &t.HasChatHandler, &t.CreatedAt, &t.UpdatedAt); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal(triggersJSON, &t.Triggers)
@@ -591,7 +626,7 @@ func scanRunScanner(s rowScanner) (*Run, error) {
 	var r Run
 	var outputJSON []byte
 	var errStr *string
-	if err := s.Scan(&r.ID, &r.TaskID, &r.UserID, &r.State, &r.Trigger, &r.StartedAt, &r.FinishedAt, &r.DurationMs, &outputJSON, &errStr); err != nil {
+	if err := s.Scan(&r.ID, &r.TaskID, &r.UserID, &r.WorkspaceID, &r.State, &r.Trigger, &r.StartedAt, &r.FinishedAt, &r.DurationMs, &outputJSON, &errStr); err != nil {
 		return nil, err
 	}
 	if errStr != nil {
@@ -614,7 +649,7 @@ func scanSession(rows pgx.Rows) (*Session, error) {
 func scanSessionScanner(s rowScanner) (*Session, error) {
 	var sess Session
 	var modelID *string
-	if err := s.Scan(&sess.ID, &sess.UserID, &sess.Title, &sess.PinnedTasks, &modelID, &sess.MessageCount, &sess.LastMsgAt, &sess.ArchivedAt, &sess.CreatedAt); err != nil {
+	if err := s.Scan(&sess.ID, &sess.UserID, &sess.WorkspaceID, &sess.Title, &sess.PinnedTasks, &modelID, &sess.MessageCount, &sess.LastMsgAt, &sess.ArchivedAt, &sess.CreatedAt); err != nil {
 		return nil, err
 	}
 	if modelID != nil {
