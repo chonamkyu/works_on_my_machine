@@ -51,6 +51,7 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	h.audit(r, "workspace.create", "workspace", ws.ID, ws.Name)
 	writeJSON(w, http.StatusCreated, ws)
 }
 
@@ -83,6 +84,7 @@ func (h *Handler) InviteMember(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": err.Error()})
 		return
 	}
+	h.audit(r, "workspace.invite_member", "workspace", wsID, body.UserID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -101,6 +103,7 @@ func (h *Handler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": err.Error()})
 		return
 	}
+	h.audit(r, "workspace.remove_member", "workspace", wsID, uid)
 	w.WriteHeader(http.StatusNoContent)
 }
 

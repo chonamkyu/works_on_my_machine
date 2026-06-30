@@ -89,6 +89,7 @@ func (h *Handler) SetUserAdmin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	h.audit(r, "admin.set_user_admin", "user", sub, "")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -108,6 +109,7 @@ func (h *Handler) SetUserDisabled(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	h.audit(r, "admin.set_user_disabled", "user", sub, "")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
