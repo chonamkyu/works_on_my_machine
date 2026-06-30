@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // Workspace represents a workspace row from the workspaces table.
@@ -129,10 +132,12 @@ func (m *Memory) InviteMember(workspaceID, ownerSub, userID, role string) error 
 func (m *Memory) RemoveMember(workspaceID, callerSub, userID string) error {
 	ctx := context.Background()
 	var callerRole string
-	m.pool.QueryRow(ctx, `
+	if err := m.pool.QueryRow(ctx, `
 		SELECT role FROM workspace_members
 		WHERE workspace_id=$1 AND user_id=$2`,
-		workspaceID, callerSub).Scan(&callerRole)
+		workspaceID, callerSub).Scan(&callerRole); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("RemoveMember: lookup caller: %w", err)
+	}
 
 	if callerRole != "owner" && callerSub != userID {
 		return fmt.Errorf("insufficient permissions to remove member")
