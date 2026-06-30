@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -318,4 +319,210 @@ func TestChatFirstMessageToTask(t *testing.T) {
 	}
 
 	t.Logf("first-message-to-task → %d: PASS; cross-ws → 404: PASS", rr.Code)
+}
+
+// TestActivityStreamWorkspaceIsolation verifies that the ActivityStream SSE
+// endpoint does NOT send events from wsB to a subscriber in wsA.
+// This test verifies the fix for C1: cross-tenant SSE isolation.
+func TestActivityStreamWorkspaceIsolation(t *testing.T) {
+	s := openTestDB(t)
+	auth.SetAdminEnv("")
+	auth.SetAdminChecker(s)
+
+	b := store.NewBus()
+	h := handler.New(s, b, nil, nil, nil, nil, nil, nil, nil, nil)
+
+	wsA := "ws-sse-a-" + randSuffix()
+	wsB := "ws-sse-b-" + randSuffix()
+
+	// Subscriber is workspace A
+	req := httptest.NewRequest(http.MethodGet, "/v1/users/"+wsA+"/activity", nil)
+	req = injectClaims(req, wsA, nil)
+	req = withWorkspace(req, wsA)
+
+	ctx, cancel := context.WithTimeout(req.Context(), 2*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	var body string
+	go func() {
+		defer close(done)
+		hRouter := chi.NewRouter()
+		hRouter.Get("/v1/users/{id}/activity", h.ActivityStream)
+		hRouter.ServeHTTP(rr, req)
+		body = rr.Body.String()
+	}()
+
+	// Give the SSE handler a moment to subscribe
+	time.Sleep(50 * time.Millisecond)
+
+	// Publish an event for wsB — should NOT be received by wsA subscriber
+	b.Publish(store.Event{Channel: "task:created:task-b", UserID: wsB, Payload: map[string]any{"id": "task-b"}})
+	// Publish an event for wsA — SHOULD be received
+	b.Publish(store.Event{Channel: "task:created:task-a", UserID: wsA, Payload: map[string]any{"id": "task-a"}})
+
+	// Wait for context timeout (so SSE stream closes)
+	<-done
+
+	if strings.Contains(body, "task-b") {
+		t.Errorf("cross-workspace event leaked to wsA subscriber: body contains task-b\nbody=%s", body)
+	}
+	if !strings.Contains(body, "task-a") {
+		t.Errorf("same-workspace event not received by wsA subscriber: body missing task-a\nbody=%s", body)
+	}
+	t.Logf("SSE isolation: wsB event not leaked, wsA event received: PASS")
+}
+
+// TestDeleteMemoryCrossTenant verifies that a workspace cannot delete memory
+// entries belonging to a different workspace.
+func TestDeleteMemoryCrossTenant(t *testing.T) {
+	pool, err := db.Open(context.Background())
+	if err != nil {
+		t.Skipf("no db: %v", err)
+	}
+	defer pool.Close()
+	ms := store.NewMemoryStore(pool)
+
+	wsA := "ws-delmem-a-" + randSuffix()
+	wsB := "ws-delmem-b-" + randSuffix()
+
+	// Write an entry for wsA
+	entry := ms.Write(&store.MemoryEntry{
+		WorkspaceID: wsA,
+		UserID:      wsA,
+		Scope:       store.ScopeUser,
+		ScopeKey:    "test-key",
+		Topic:       "test-topic",
+		Content:     "test-value",
+	})
+	if entry == nil {
+		t.Fatal("Write returned nil")
+	}
+
+	// Try to delete as wsB — should return false (0 rows affected)
+	deleted := ms.Delete(entry.ID, wsB)
+	if deleted {
+		t.Error("cross-tenant delete succeeded, expected failure")
+	}
+
+	// Verify entry still exists by listing
+	entries := ms.List(wsA, store.ScopeUser, "")
+	found := false
+	for _, e := range entries {
+		if e.ID == entry.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("entry was deleted by cross-tenant delete, should still exist")
+	}
+
+	// Delete as wsA — should succeed
+	deleted = ms.Delete(entry.ID, wsA)
+	if !deleted {
+		t.Error("same-tenant delete failed, expected success")
+	}
+	t.Log("cross-tenant delete blocked, same-tenant delete succeeded: PASS")
+}
+
+// TestAcceptEvolutionPRCrossTenant verifies that GetEvolutionPR returns 404
+// when a different workspace attempts to read a PR that belongs to another workspace.
+func TestAcceptEvolutionPRCrossTenant(t *testing.T) {
+	pool, err := db.Open(context.Background())
+	if err != nil {
+		t.Skipf("no db: %v", err)
+	}
+	defer pool.Close()
+	s := store.NewMemory(pool)
+	s.Seed(context.Background(), "dev")
+	evo := store.NewEvolutionStore(pool)
+	auth.SetAdminEnv("")
+	auth.SetAdminChecker(s)
+
+	wsA := "ws-evo-a-" + randSuffix()
+	wsB := "ws-evo-b-" + randSuffix()
+
+	// Create a real task in wsA (evolution_prs.task_id has a FK → tasks.id).
+	task := s.CreateTask(&store.Task{
+		UserID:      wsA,
+		WorkspaceID: wsA,
+		Name:        "evo-test-task",
+	})
+
+	// Create a PR for wsA
+	pr := evo.Create(&store.EvolutionPR{
+		TaskID:      task.ID,
+		UserID:      wsA,
+		WorkspaceID: wsA,
+		Reason:      "test",
+	})
+
+	// Try to GET it as wsB — should 404
+	h := handler.New(s, nil, nil, nil, nil, nil, evo, nil, nil, nil)
+	r := chi.NewRouter()
+	r.Get("/evolution/{id}", h.GetEvolutionPR)
+
+	req := httptest.NewRequest(http.MethodGet, "/evolution/"+pr.ID, nil)
+	req = injectClaims(req, wsB, nil)
+	req = withWorkspace(req, wsB)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("cross-tenant GetEvolutionPR: want 404, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// GET as wsA — should 200
+	req2 := httptest.NewRequest(http.MethodGet, "/evolution/"+pr.ID, nil)
+	req2 = injectClaims(req2, wsA, nil)
+	req2 = withWorkspace(req2, wsA)
+	rr2 := httptest.NewRecorder()
+	r.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Errorf("same-tenant GetEvolutionPR: want 200, got %d body=%s", rr2.Code, rr2.Body.String())
+	}
+	t.Log("cross-tenant GetEvolutionPR → 404, same-tenant → 200: PASS")
+}
+
+// TestCreateTaskAudit verifies that creating a task records a task.create
+// audit log entry for the calling workspace.
+func TestCreateTaskAudit(t *testing.T) {
+	s := openTestDB(t)
+	auth.SetAdminEnv("")
+	auth.SetAdminChecker(s)
+
+	wsA := "ws-audit-" + randSuffix()
+	b := store.NewBus()
+	h := handler.New(s, b, nil, nil, nil, nil, nil, nil, nil, nil)
+
+	r := chi.NewRouter()
+	r.Post("/tasks", h.CreateTask)
+
+	body := `{"name":"audit-test-task","description":"test"}`
+	req := httptest.NewRequest(http.MethodPost, "/tasks", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = injectClaims(req, wsA, nil)
+	req = withWorkspace(req, wsA)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("CreateTask: want 201, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Check audit log has a task.create entry for wsA
+	entries := s.ListAudit(wsA, 10)
+	found := false
+	for _, e := range entries {
+		if e.Action == "task.create" && e.WorkspaceID == wsA {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("no task.create audit entry found for workspace %s", wsA)
+	}
+	t.Log("task.create audit entry found: PASS")
 }

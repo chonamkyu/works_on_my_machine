@@ -2,15 +2,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "react-oidc-context";
 import type { Task, SSEMessage } from "./lib/api";
 import { api, subscribe } from "./lib/api";
-import { devMode, setAuthToken } from "./lib/auth";
+import { devMode, setAuthToken, getActiveWorkspace } from "./lib/auth";
 import { TopBar } from "./components/TopBar";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
 import { CommandPalette } from "./components/CommandPalette";
 import { SettingsOverlay, type OverlayTab } from "./components/SettingsOverlay";
 import { UIPane, type PaneTab } from "./components/UIPane";
-
-const USER_ID = "u_local";
 
 // Every meaningful piece of UI state lives in the URL so links are shareable
 // and a refresh restores the layout exactly. Booleans use "1"/missing, the
@@ -105,7 +103,7 @@ export function App() {
   useEffect(() => { refresh().catch(console.error); }, [refresh]);
 
   useEffect(() => {
-    const stop = subscribe(`/v1/users/${USER_ID}/activity`, (msg: SSEMessage) => {
+    const stop = subscribe(`/v1/users/${getActiveWorkspace() ?? "local"}/activity`, (msg: SSEMessage) => {
       if (msg.channel.startsWith("trigger:fired:")) {
         const taskId = msg.channel.slice("trigger:fired:".length);
         setPulses((p) => ({ ...p, [taskId]: Date.now() }));

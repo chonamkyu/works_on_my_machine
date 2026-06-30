@@ -90,6 +90,27 @@ func New(
 	}
 }
 
+// audit records a best-effort audit event. Errors are silently ignored so
+// audit failures never block a request.
+func (h *Handler) audit(r *http.Request, action, resType, resID, resName string) {
+	ctx := r.Context()
+	ws := auth.MustWorkspaceID(ctx)
+	sub := auth.MustUserID(ctx)
+	email := ""
+	if c := auth.ClaimsFromCtx(ctx); c != nil {
+		email = c.Email
+	}
+	_ = h.Store.RecordAudit(store.AuditEntry{
+		ActorSub:     sub,
+		ActorEmail:   email,
+		Action:       action,
+		ResourceType: resType,
+		ResourceID:   resID,
+		ResourceName: resName,
+		WorkspaceID:  ws,
+	})
+}
+
 // scheduleDryRun spawns the workflow with PLATFORM_DRY_RUN=1 right after
 // files are written so generator hallucinations surface within seconds
 // instead of at first real run. Result is stored per-task and injected into
@@ -638,7 +659,7 @@ func (h *Handler) ResolveProfileSuggestion(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "status must be accepted or rejected"})
 		return
 	}
-	s, err := h.Store.ResolveProfileSuggestion(id, body.Status)
+	s, err := h.Store.ResolveProfileSuggestion(id, body.Status, auth.MustWorkspaceID(r.Context()))
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 		return
@@ -951,6 +972,7 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		TaskID:  t.ID,
 		Payload: map[string]any{"task": t},
 	})
+	h.audit(r, "task.create", "task", t.ID, t.Name)
 	writeJSON(w, http.StatusCreated, t)
 }
 
@@ -1026,6 +1048,7 @@ func (h *Handler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 		UserID:  auth.MustWorkspaceID(r.Context()),
 		TaskID:  id,
 	})
+	h.audit(r, "task.delete", "task", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1159,6 +1182,7 @@ func (h *Handler) TriggerRun(w http.ResponseWriter, r *http.Request) {
 		body.Trigger = "manual"
 	}
 	run := h.Runner.Start(t, body.Trigger)
+	h.audit(r, "run.trigger", "run", run.ID, "")
 	writeJSON(w, http.StatusAccepted, run)
 }
 
@@ -1188,6 +1212,7 @@ func (h *Handler) CancelRun(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no active run"})
 		return
 	}
+	h.audit(r, "run.cancel", "run", id, "")
 	w.WriteHeader(http.StatusAccepted)
 }
 
@@ -1320,7 +1345,7 @@ func (h *Handler) TaskEventsStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ActivityStream(w http.ResponseWriter, r *http.Request) {
-	userID := chi.URLParam(r, "id")
+	ws := auth.MustWorkspaceID(r.Context())
 	patterns := []string{
 		"trigger:fired:*", "run:state:*",
 		"task:created:*", "task:updated:*", "task:archived:*",
@@ -1334,7 +1359,7 @@ func (h *Handler) ActivityStream(w http.ResponseWriter, r *http.Request) {
 		cancels = append(cancels, cancel)
 		go func(c <-chan store.Event) {
 			for ev := range c {
-				if ev.UserID != "" && ev.UserID != userID {
+				if ev.UserID != "" && ev.UserID != ws {
 					continue
 				}
 				merged <- ev
@@ -1592,7 +1617,7 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 			// Best-effort delete by connector+label match.
 			for _, c := range h.Credentials.List(wsID) {
 				if c.Connector == mc.Connector && (mc.Label == "" || c.Label == mc.Label) {
-					_ = h.Credentials.Delete(c.ID)
+					_ = h.Credentials.Delete(c.ID, wsID)
 				}
 			}
 		default: // upsert
@@ -1821,7 +1846,7 @@ func (h *Handler) ListMemory(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) DeleteMemory(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if !h.Memory.Delete(id) {
+	if !h.Memory.Delete(id, auth.MustWorkspaceID(r.Context())) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		return
 	}
@@ -1841,6 +1866,11 @@ func (h *Handler) GetEvolutionPR(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		return
 	}
+	ws := auth.MustWorkspaceID(r.Context())
+	if pr.WorkspaceID != ws && !auth.IsAdmin(r.Context()) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
+		return
+	}
 	writeJSON(w, http.StatusOK, pr)
 }
 
@@ -1848,6 +1878,11 @@ func (h *Handler) AcceptEvolutionPR(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	pr, err := h.Evolution.Get(id)
 	if errors.Is(err, store.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
+		return
+	}
+	ws := auth.MustWorkspaceID(r.Context())
+	if pr.WorkspaceID != ws && !auth.IsAdmin(r.Context()) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		return
 	}
@@ -1866,7 +1901,17 @@ func (h *Handler) AcceptEvolutionPR(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) RejectEvolutionPR(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	pr, err := h.Evolution.Resolve(id, store.EvolutionRejected)
+	pr, err := h.Evolution.Get(id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
+		return
+	}
+	ws := auth.MustWorkspaceID(r.Context())
+	if pr.WorkspaceID != ws && !auth.IsAdmin(r.Context()) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
+		return
+	}
+	pr, err = h.Evolution.Resolve(id, store.EvolutionRejected)
 	if errors.Is(err, store.ErrNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		return
@@ -1926,15 +1971,17 @@ func (h *Handler) CreateCredential(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	h.audit(r, "credential.create", "credential", c.ID, c.Label)
 	writeJSON(w, http.StatusCreated, c)
 }
 
 func (h *Handler) DeleteCredential(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := h.Credentials.Delete(id); errors.Is(err, store.ErrNotFound) {
+	if err := h.Credentials.Delete(id, auth.MustWorkspaceID(r.Context())); errors.Is(err, store.ErrNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		return
 	}
+	h.audit(r, "credential.delete", "credential", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
