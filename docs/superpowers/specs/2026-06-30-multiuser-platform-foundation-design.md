@@ -217,8 +217,11 @@ New migration(s) under `api/internal/db/migrations/` (next index after
   `skill_proposals`, `evolution_prs`, `task_archive`, `sessions`,
   `messages`, `credentials`, `task_index`). Composite indexes become
   `(workspace_id, ...)`; pgvector / pg_trgm indexes likewise.
-- **Backfill**: existing single-user rows map to a seeded `default` workspace
-  (reversible). The legacy `DefaultUserID` becomes that workspace's owner.
+- **No backfill — existing data is disposable** (confirmed by the user). The
+  migration may truncate tenant-scoped tables before adding the
+  `workspace_id` column; there is no legacy-row migration to preserve. A
+  `default` workspace + dev user are seeded so dev mode (`PLATFORM_AUTH_DEV=1`)
+  has a working tenant out of the box.
 
 ## 7. Configuration (`platform/.env`)
 
@@ -246,8 +249,8 @@ Frontend (`web/`, `react-oidc-context`): `authority = KEYCLOAK_ISSUER`,
 - Non-member accessing a workspace (API or proxy) → 403.
 - Supervisor unreachable for a workspace → run marked failed with a clear
   error; `Health(ws)` surfaces the condition (no silent hang).
-- Backfill migration is idempotent and reversible (down migration restores
-  pre-tenancy state by dropping added columns/tables).
+- Migration is idempotent; since legacy data is disposable, tenant tables may
+  be reset rather than migrated.
 
 ## 9. Testing
 
@@ -258,8 +261,8 @@ Frontend (`web/`, `react-oidc-context`): `authority = KEYCLOAK_ISSUER`,
 - Supervisor: `process` backend start/cancel/health; `container` backend
   smoke test (skipped if podman absent); `k8s` interface conformance against
   a fake.
-- Migration: backfill maps legacy rows to `default` workspace; down migration
-  is clean.
+- Migration: applies cleanly on an empty/reset DB; seeded `default` workspace
+  + dev user exist; tenant tables are workspace-scoped from the start.
 
 ## 10. Roadmap (out of scope for this spec)
 
@@ -281,9 +284,9 @@ corresponding llmgate package:
 - **JWT signature verification**: we follow the in-house "trust the frontend"
   convention. If the threat model later requires backend verification, add a
   JWKS path behind a flag (not in A).
-- **Backfill correctness**: the legacy `DefaultUserID` → `default` workspace
-  mapping must cover every tenant-scoped table; a missed table silently hides
-  data. Mitigation: enumerate tables in the migration and assert row counts.
+- **Legacy data dropped**: existing single-user data is intentionally
+  discarded (user-confirmed). No production data exists yet, so this is safe;
+  if that changes before rollout, revisit with a backfill step.
 - **`process` backend isolation is logical, not hard**: acceptable given the
   trusted-team (hundreds, internal) threat model; hard isolation comes with
   `container`/`k8s`.
