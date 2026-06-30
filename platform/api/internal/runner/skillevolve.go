@@ -72,7 +72,7 @@ func (s *SkillEvolver) loop() {
 		case <-s.stop:
 			return
 		case <-t.C:
-			s.runOnce(store.DefaultUserID)
+			s.runOnce(store.GlobalScope)
 			t.Reset(s.tick)
 		}
 	}

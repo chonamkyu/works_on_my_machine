@@ -37,7 +37,7 @@ func main() {
 	defer pool.Close()
 
 	taskStore := store.NewMemory(pool)
-	taskStore.Seed(ctx)
+	taskStore.Seed(ctx, "dev")
 
 	authMW := auth.New(os.Getenv("PLATFORM_AUTH_DEV") == "1")
 	auth.SetAdminEnv(os.Getenv("PLATFORM_ADMIN_USERS"))
@@ -132,6 +132,7 @@ func main() {
 		func(uid string, res *reflection.SkillProposeResult) {
 			_, _ = taskStore.CreateSkillProposal(&store.SkillProposal{
 				UserID:      uid,
+				WorkspaceID: uid, // GlobalScope for the evolver
 				SkillName:   res.SkillName,
 				SkillBody:   res.SkillBody,
 				Rationale:   res.Rationale,
@@ -155,13 +156,19 @@ func main() {
 		t := time.NewTicker(24 * time.Hour)
 		defer t.Stop()
 		runPrune := func() {
-			n, err := memStore.PruneStale(store.DefaultUserID, 90, 60, 0)
-			if err != nil {
-				log.Printf("memory prune failed: %v", err)
-				return
+			workspaces := memStore.ListAllWorkspaceIDs()
+			if len(workspaces) == 0 {
+				workspaces = []string{"dev"} // fallback for empty DB
 			}
-			if n > 0 {
-				log.Printf("memory prune: archived %d stale entries", n)
+			for _, ws := range workspaces {
+				n, err := memStore.PruneStale(ws, 90, 60, 0)
+				if err != nil {
+					log.Printf("memory prune failed for %s: %v", ws, err)
+					continue
+				}
+				if n > 0 {
+					log.Printf("memory prune: archived %d stale entries for workspace %s", n, ws)
+				}
 			}
 		}
 		runPrune()

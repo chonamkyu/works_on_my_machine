@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/nk/platform/api/internal/auth"
 	"github.com/nk/platform/api/internal/generator"
 	"github.com/nk/platform/api/internal/oauth"
 	"github.com/nk/platform/api/internal/portreg"
@@ -93,7 +94,7 @@ func New(
 // files are written so generator hallucinations surface within seconds
 // instead of at first real run. Result is stored per-task and injected into
 // the next chat turn's generator context.
-func (h *Handler) scheduleDryRun(taskID, sessionID string) {
+func (h *Handler) scheduleDryRun(taskID, sessionID, wsID string) {
 	if h.Node == nil {
 		return
 	}
@@ -110,7 +111,7 @@ func (h *Handler) scheduleDryRun(taskID, sessionID string) {
 		h.dryMu.Unlock()
 		h.Bus.Publish(store.Event{
 			Channel: "chat:progress:" + sessionID,
-			UserID:  store.DefaultUserID,
+			UserID:  wsID,
 			Payload: map[string]any{"channel": "workflow:dryrun", "data": res},
 		})
 		if res.OK {
@@ -164,7 +165,7 @@ func (h *Handler) TriggerDryRun(w http.ResponseWriter, r *http.Request) {
 // daemon and bind a port, then call the verify service. The result is stored
 // in memory (latest per task) and published on chat:progress so the UI shows
 // status; on the next chat turn the generator sees it via the task summary.
-func (h *Handler) scheduleVerification(taskID, sessionID string) {
+func (h *Handler) scheduleVerification(taskID, sessionID, wsID string) {
 	if h.Verify == nil {
 		return
 	}
@@ -197,7 +198,7 @@ func (h *Handler) scheduleVerification(taskID, sessionID string) {
 		h.verifMu.Unlock()
 		h.Bus.Publish(store.Event{
 			Channel: "chat:progress:" + sessionID,
-			UserID:  store.DefaultUserID,
+			UserID:  wsID,
 			Payload: map[string]any{"channel": "workflow:verify", "data": res},
 		})
 		log.Printf("verify %s: ok=%v errors=%v", taskID, res.OK, res.Errors)
@@ -327,11 +328,12 @@ func (h *Handler) scheduleChatReflection(userMsg, agentReply, sessionID, userID 
 		written := 0
 		for _, upd := range res.MemoryUpdates {
 			entry := h.Memory.Write(&store.MemoryEntry{
-				UserID:  userID,
-				Scope:   store.ScopeUser,
-				Topic:   upd.Topic,
-				Content: upd.Content,
-				Pinned:  upd.Pinned,
+				UserID:      userID,
+				WorkspaceID: userID,
+				Scope:       store.ScopeUser,
+				Topic:       upd.Topic,
+				Content:     upd.Content,
+				Pinned:      upd.Pinned,
 			})
 			written++
 			h.Bus.Publish(store.Event{
@@ -362,7 +364,7 @@ func (h *Handler) ProposeSkill(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "reflection or memory not wired"})
 		return
 	}
-	userID := store.DefaultUserID
+	userID := auth.MustWorkspaceID(r.Context())
 	mems := h.Memory.List(userID, store.ScopeUser, "")
 	memMeta := make([]reflection.MemoryWithMeta, 0, len(mems))
 	for _, m := range mems {
@@ -426,7 +428,7 @@ func (h *Handler) AcceptSkill(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name must be kebab-case slug"})
 		return
 	}
-	dir := perUserSkillsDir(store.DefaultUserID)
+	dir := perUserSkillsDir(auth.MustWorkspaceID(r.Context()))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -448,7 +450,7 @@ func (h *Handler) MemoryStats(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
-	writeJSON(w, http.StatusOK, h.Memory.Stats(store.DefaultUserID))
+	writeJSON(w, http.StatusOK, h.Memory.Stats(auth.MustWorkspaceID(r.Context())))
 }
 
 func (h *Handler) PruneMemory(w http.ResponseWriter, r *http.Request) {
@@ -456,7 +458,7 @@ func (h *Handler) PruneMemory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "memory not wired"})
 		return
 	}
-	n, err := h.Memory.PruneStale(store.DefaultUserID, 90, 60, 0)
+	n, err := h.Memory.PruneStale(auth.MustWorkspaceID(r.Context()), 90, 60, 0)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -466,7 +468,7 @@ func (h *Handler) PruneMemory(w http.ResponseWriter, r *http.Request) {
 
 // ListUserSkills returns the per-user skill overlay files.
 func (h *Handler) ListUserSkills(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"skills": loadOverlaySkills(store.DefaultUserID)})
+	writeJSON(w, http.StatusOK, map[string]any{"skills": loadOverlaySkills(auth.MustWorkspaceID(r.Context()))})
 }
 
 // --- Skill proposal lifecycle (Phase 4 nightly evolver writes here) ---
@@ -474,7 +476,7 @@ func (h *Handler) ListUserSkills(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListSkillProposals(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	writeJSON(w, http.StatusOK, map[string]any{
-		"proposals": h.Store.ListSkillProposals(store.DefaultUserID, status),
+		"proposals": h.Store.ListSkillProposals(auth.MustWorkspaceID(r.Context()), status),
 	})
 }
 
@@ -519,7 +521,7 @@ func (h *Handler) TriggerSkillEvolve(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "skill evolver not wired"})
 		return
 	}
-	go h.SkillEvolver.RunOnce(store.DefaultUserID)
+	go h.SkillEvolver.RunOnce(store.GlobalScope)
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "running"})
 }
 
@@ -529,7 +531,7 @@ func (h *Handler) DeleteUserSkill(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad name"})
 		return
 	}
-	path := filepath.Join(perUserSkillsDir(store.DefaultUserID), name+".md")
+	path := filepath.Join(perUserSkillsDir(auth.MustWorkspaceID(r.Context())), name+".md")
 	if err := os.Remove(path); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 		return
@@ -579,13 +581,14 @@ func (h *Handler) GetUserProfile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
-	p, err := h.Store.GetUserProfile(store.DefaultUserID)
+	wsID := auth.MustWorkspaceID(r.Context())
+	p, err := h.Store.GetUserProfile(wsID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
 	if p == nil {
-		writeJSON(w, http.StatusOK, &store.UserProfile{UserID: store.DefaultUserID})
+		writeJSON(w, http.StatusOK, &store.UserProfile{UserID: wsID})
 		return
 	}
 	writeJSON(w, http.StatusOK, p)
@@ -597,7 +600,7 @@ func (h *Handler) PutUserProfile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	p.UserID = store.DefaultUserID
+	p.UserID = auth.MustWorkspaceID(r.Context())
 	if err := h.Store.UpsertUserProfile(&p); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -608,7 +611,7 @@ func (h *Handler) PutUserProfile(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListProfileSuggestions(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	writeJSON(w, http.StatusOK, map[string]any{
-		"suggestions": h.Store.ListProfileSuggestions(store.DefaultUserID, status),
+		"suggestions": h.Store.ListProfileSuggestions(auth.MustWorkspaceID(r.Context()), status),
 	})
 }
 
@@ -746,7 +749,7 @@ func (h *Handler) StartOAuth(w http.ResponseWriter, r *http.Request) {
 	if body.Label == "" {
 		body.Label = "oauth"
 	}
-	url, err := h.OAuth.Start(body.Provider, body.Label, store.DefaultUserID, body.Scopes)
+	url, err := h.OAuth.Start(body.Provider, body.Label, auth.MustWorkspaceID(r.Context()), body.Scopes)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
@@ -824,7 +827,7 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 // --- tasks ------------------------------------------------------------
 
 func (h *Handler) ListTasks(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"tasks": h.Store.ListTasks(store.DefaultUserID)})
+	writeJSON(w, http.StatusOK, map[string]any{"tasks": h.Store.ListTasks(auth.MustWorkspaceID(r.Context()))})
 }
 
 type createTaskBody struct {
@@ -843,16 +846,18 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	if body.Name == "" {
 		body.Name = "draft"
 	}
+	wsID := auth.MustWorkspaceID(r.Context())
 	t := h.Store.CreateTask(&store.Task{
-		UserID:       store.DefaultUserID,
+		UserID:       wsID,
+		WorkspaceID:  wsID,
 		Name:         body.Name,
 		Description:  body.Description,
 		Triggers:     body.Triggers,
 		Capabilities: body.Capabilities,
 	})
 	h.Bus.Publish(store.Event{
-		Channel: "task:created:" + store.DefaultUserID,
-		UserID:  store.DefaultUserID,
+		Channel: "task:created:" + wsID,
+		UserID:  wsID,
 		TaskID:  t.ID,
 		Payload: map[string]any{"task": t},
 	})
@@ -922,8 +927,8 @@ func (h *Handler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	// the task back up. The archive table already has a copy.
 	_ = os.RemoveAll(h.Files.Dir(id))
 	h.Bus.Publish(store.Event{
-		Channel: "task:archived:" + store.DefaultUserID,
-		UserID:  store.DefaultUserID,
+		Channel: "task:archived:" + auth.MustWorkspaceID(r.Context()),
+		UserID:  auth.MustWorkspaceID(r.Context()),
 		TaskID:  id,
 	})
 	w.WriteHeader(http.StatusNoContent)
@@ -951,7 +956,7 @@ func (h *Handler) archiveBeforeDelete(id string) {
 
 func (h *Handler) ListArchivedTasks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"tasks": h.Store.ListArchivedTasks(store.DefaultUserID),
+		"tasks": h.Store.ListArchivedTasks(auth.MustWorkspaceID(r.Context())),
 	})
 }
 
@@ -1279,8 +1284,10 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
 	defer cancel()
 
+	wsID := auth.MustWorkspaceID(r.Context())
+
 	connectors := []string{}
-	for _, c := range h.Credentials.List(store.DefaultUserID) {
+	for _, c := range h.Credentials.List(wsID) {
 		connectors = append(connectors, c.Connector)
 	}
 
@@ -1291,7 +1298,7 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	existing := []generator.ExistingTask{}
-	for _, t := range h.Store.ListTasks(store.DefaultUserID) {
+	for _, t := range h.Store.ListTasks(wsID) {
 		mainTs, _ := h.Files.ReadFile(t.ID, "main.ts")
 		gtTriggers := make([]generator.Trigger, 0, len(t.Triggers))
 		for _, tr := range t.Triggers {
@@ -1369,19 +1376,19 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 	// Phase 1 self-tuning: retrieve user-scope memories that match this turn
 	// and any pinned memories the user explicitly anchored. Both go into the
 	// generator request so the agent can adapt to known preferences.
-	retrievedMem := h.gatherUserContext(store.DefaultUserID, body.Content, history)
+	retrievedMem := h.gatherUserContext(wsID, body.Content, history)
 	memHints := make([]generator.MemoryHint, 0, len(retrievedMem))
 	for _, m := range retrievedMem {
 		memHints = append(memHints, generator.MemoryHint{Topic: m.Topic, Content: m.Content, Pinned: m.Pinned})
 	}
 	// Phase 2 self-tuning: load the user's stable profile (preferred language,
 	// reply tone, hard rules, etc.) and pass verbatim.
-	userProfile := h.loadUserProfileMap(store.DefaultUserID)
+	userProfile := h.loadUserProfileMap(wsID)
 
 	outcome, err := h.Generator.Generate(ctx, generator.Request{
 		Prompt:              body.Content,
 		SessionID:           sessionID,
-		UserID:              store.DefaultUserID,
+		UserID:              wsID,
 		ActiveTaskID:        activeTaskID,
 		ActiveTaskIsDraft:   activeIsDraft,
 		ConnectorsAvailable: connectors,
@@ -1394,7 +1401,7 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(payload, &data)
 		h.Bus.Publish(store.Event{
 			Channel: "chat:progress:" + sessionID,
-			UserID:  store.DefaultUserID,
+			UserID:  wsID,
 			Payload: map[string]any{"channel": channel, "data": data},
 		})
 	})
@@ -1416,7 +1423,7 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 	// reply is computed. It extracts user-level preferences/corrections from
 	// (user msg, agent reply) and persists them as memory_entries; future
 	// turns will see them via gatherUserContext.
-	h.scheduleChatReflection(body.Content, outcome.Reply, sessionID, store.DefaultUserID, history, retrievedMem)
+	h.scheduleChatReflection(body.Content, outcome.Reply, sessionID, wsID, history, retrievedMem)
 
 	switch outcome.Intent {
 	case generator.IntentChat:
@@ -1436,17 +1443,18 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 		switch mc.Action {
 		case "delete":
 			// Best-effort delete by connector+label match.
-			for _, c := range h.Credentials.List(store.DefaultUserID) {
+			for _, c := range h.Credentials.List(wsID) {
 				if c.Connector == mc.Connector && (mc.Label == "" || c.Label == mc.Label) {
 					_ = h.Credentials.Delete(c.ID)
 				}
 			}
 		default: // upsert
 			_, err := h.Credentials.Upsert(&store.Credential{
-				UserID:    store.DefaultUserID,
-				Connector: mc.Connector,
-				Label:     mc.Label,
-				Value:     mc.Value,
+				UserID:      wsID,
+				WorkspaceID: wsID,
+				Connector:   mc.Connector,
+				Label:       mc.Label,
+				Value:       mc.Value,
 			})
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -1486,8 +1494,8 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 				_ = os.RemoveAll(h.Files.Dir(id))
 				deleted = append(deleted, id)
 				h.Bus.Publish(store.Event{
-					Channel: "task:archived:" + store.DefaultUserID,
-					UserID:  store.DefaultUserID,
+					Channel: "task:archived:" + wsID,
+					UserID:  wsID,
 					TaskID:  id,
 				})
 			}
@@ -1547,15 +1555,15 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 			if err := h.Files.WriteFiles(taskID, outcome.Files); err != nil {
 				log.Printf("update write failed: %v", err)
 			}
-			h.scheduleDryRun(taskID, sessionID)
+			h.scheduleDryRun(taskID, sessionID, wsID)
 			if task.Kind == "service" && h.Services != nil {
 				h.Services.Restart(taskID)
-				h.scheduleVerification(taskID, sessionID)
+				h.scheduleVerification(taskID, sessionID, wsID)
 			}
 		}
 		h.Bus.Publish(store.Event{
-			Channel: "task:updated:" + store.DefaultUserID,
-			UserID:  store.DefaultUserID,
+			Channel: "task:updated:" + wsID,
+			UserID:  wsID,
 			TaskID:  taskID,
 			Payload: map[string]any{"task": task},
 		})
@@ -1584,7 +1592,8 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 			ports = ensureChatPort(ports)
 		}
 		task := h.Store.CreateTask(&store.Task{
-			UserID:         store.DefaultUserID,
+			UserID:         wsID,
+			WorkspaceID:    wsID,
 			Name:           outcome.Name,
 			Description:    outcome.Description,
 			Capabilities:   outcome.Capabilities,
@@ -1596,13 +1605,13 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 		if err := h.Files.WriteFiles(task.ID, outcome.Files); err != nil {
 			log.Printf("workflow write failed: %v", err)
 		}
-		h.scheduleDryRun(task.ID, sessionID)
+		h.scheduleDryRun(task.ID, sessionID, wsID)
 		if task.Kind == "service" {
-			h.scheduleVerification(task.ID, sessionID)
+			h.scheduleVerification(task.ID, sessionID, wsID)
 		}
 		h.Bus.Publish(store.Event{
-			Channel: "task:created:" + store.DefaultUserID,
-			UserID:  store.DefaultUserID,
+			Channel: "task:created:" + wsID,
+			UserID:  wsID,
 			TaskID:  task.ID,
 			Payload: map[string]any{"task": task},
 		})
@@ -1625,7 +1634,7 @@ func (h *Handler) ListChatMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListSessions(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": h.Store.ListSessions(store.DefaultUserID)})
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": h.Store.ListSessions(auth.MustWorkspaceID(r.Context()))})
 }
 
 type createSessionBody struct{ Title string `json:"title"` }
@@ -1636,7 +1645,8 @@ func (h *Handler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	if body.Title == "" {
 		body.Title = "Untitled"
 	}
-	s := h.Store.CreateSession(&store.Session{UserID: store.DefaultUserID, Title: body.Title})
+	wsID := auth.MustWorkspaceID(r.Context())
+	s := h.Store.CreateSession(&store.Session{UserID: wsID, WorkspaceID: wsID, Title: body.Title})
 	writeJSON(w, http.StatusCreated, s)
 }
 
@@ -1645,7 +1655,7 @@ func (h *Handler) CreateSession(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListMemory(w http.ResponseWriter, r *http.Request) {
 	scope := store.MemoryScope(r.URL.Query().Get("scope"))
 	scopeKey := r.URL.Query().Get("scopeKey")
-	entries := h.Memory.List(store.DefaultUserID, scope, scopeKey)
+	entries := h.Memory.List(auth.MustWorkspaceID(r.Context()), scope, scopeKey)
 	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
 }
 
@@ -1661,7 +1671,7 @@ func (h *Handler) DeleteMemory(w http.ResponseWriter, r *http.Request) {
 // --- evolution --------------------------------------------------------
 
 func (h *Handler) ListEvolutionPRs(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"prs": h.Evolution.List(store.DefaultUserID)})
+	writeJSON(w, http.StatusOK, map[string]any{"prs": h.Evolution.List(auth.MustWorkspaceID(r.Context()))})
 }
 
 func (h *Handler) GetEvolutionPR(w http.ResponseWriter, r *http.Request) {
@@ -1726,7 +1736,7 @@ type createCredentialBody struct {
 }
 
 func (h *Handler) ListCredentials(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"credentials": h.Credentials.List(store.DefaultUserID)})
+	writeJSON(w, http.StatusOK, map[string]any{"credentials": h.Credentials.List(auth.MustWorkspaceID(r.Context()))})
 }
 
 func (h *Handler) CreateCredential(w http.ResponseWriter, r *http.Request) {
@@ -1743,13 +1753,15 @@ func (h *Handler) CreateCredential(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "either 'secret' or 'value' is required"})
 		return
 	}
+	wsID := auth.MustWorkspaceID(r.Context())
 	c, err := h.Credentials.Upsert(&store.Credential{
-		UserID:    store.DefaultUserID,
-		Connector: body.Connector,
-		Label:     body.Label,
-		Secret:    body.Secret,
-		Value:     body.Value,
-		Scopes:    body.Scopes,
+		UserID:      wsID,
+		WorkspaceID: wsID,
+		Connector:   body.Connector,
+		Label:       body.Label,
+		Secret:      body.Secret,
+		Value:       body.Value,
+		Scopes:      body.Scopes,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -1858,7 +1870,7 @@ func (h *Handler) DiscoverTasks(w http.ResponseWriter, r *http.Request) {
 	// Memory-search-driven for now (lexical+vector hybrid via memory store
 	// is also reasonable). For Phase 1 simplicity, surface tasks whose
 	// description fuzzy-matches the query.
-	tasks := h.Store.ListTasks(store.DefaultUserID)
+	tasks := h.Store.ListTasks(auth.MustWorkspaceID(r.Context()))
 	results := []map[string]any{}
 	lo := strings.ToLower(q)
 	for _, t := range tasks {
@@ -1896,8 +1908,10 @@ func (h *Handler) ForkTask(w http.ResponseWriter, r *http.Request) {
 	}
 	yaml, _ := h.Files.ReadFile(id, "workflow.yaml")
 	main, _ := h.Files.ReadFile(id, "main.ts")
+	forkWsID := auth.MustWorkspaceID(r.Context())
 	dup := h.Store.CreateTask(&store.Task{
-		UserID:       store.DefaultUserID,
+		UserID:       forkWsID,
+		WorkspaceID:  forkWsID,
 		Name:         src.Name + "-fork",
 		Description:  "Fork of " + src.ID + ": " + src.Description,
 		Capabilities: src.Capabilities,
@@ -2181,7 +2195,8 @@ Anything else without a slash is sent straight to the task's chat handler
 		h.archiveBeforeDelete(sessionID)
 		_ = h.Store.DeleteTask(sessionID)
 		_ = os.RemoveAll(h.Files.Dir(sessionID))
-		h.Bus.Publish(store.Event{Channel: "task:archived:" + store.DefaultUserID, UserID: store.DefaultUserID, TaskID: sessionID})
+		archiveWsID := auth.MustWorkspaceID(r.Context())
+		h.Bus.Publish(store.Event{Channel: "task:archived:" + archiveWsID, UserID: archiveWsID, TaskID: sessionID})
 		writeJSON(w, http.StatusOK, map[string]any{"sessionId": sessionID, "reply": "archived."})
 		return true
 	case "run":

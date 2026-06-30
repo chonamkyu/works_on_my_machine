@@ -108,7 +108,7 @@ func (r *MockRunner) transition(run *store.Run, state store.RunState, mutate fun
 	})
 	r.bus.Publish(store.Event{
 		Channel: "run:state:" + run.ID,
-		UserID:  store.DefaultUserID,
+		UserID:  run.WorkspaceID,
 		TaskID:  run.TaskID,
 		RunID:   run.ID,
 		Payload: map[string]any{"state": string(state), "run": updated},

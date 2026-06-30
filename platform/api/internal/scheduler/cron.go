@@ -49,7 +49,7 @@ func (c *Cron) Sync() {
 	defer c.mu.Unlock()
 
 	desired := map[string]string{}
-	tasks := c.store.ListTasks(store.DefaultUserID)
+	tasks := c.store.ListAllTasks()
 	for _, t := range tasks {
 		for _, tr := range t.Triggers {
 			if tr.Type != "cron" || !tr.Enabled {

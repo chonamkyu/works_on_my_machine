@@ -26,7 +26,7 @@ func openTestDB(t *testing.T) *store.Memory {
 	}
 	t.Cleanup(func() { pool.Close() })
 	s := store.NewMemory(pool)
-	s.Seed(context.Background())
+	s.Seed(context.Background(), "dev")
 	return s
 }
 
