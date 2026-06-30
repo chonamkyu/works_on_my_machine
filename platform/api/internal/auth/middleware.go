@@ -73,6 +73,12 @@ func withClaims(ctx context.Context, c *Claims) context.Context {
 	return context.WithValue(ctx, claimsKey, c)
 }
 
+// WithClaims injects claims directly into a context. Intended for tests that
+// need to simulate an authenticated caller without a real JWT.
+func WithClaims(ctx context.Context, c *Claims) context.Context {
+	return withClaims(ctx, c)
+}
+
 func ClaimsFromCtx(ctx context.Context) *Claims {
 	c, _ := ctx.Value(claimsKey).(*Claims)
 	return c

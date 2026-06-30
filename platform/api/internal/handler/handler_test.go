@@ -2,6 +2,8 @@ package handler_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -91,6 +93,96 @@ func TestMeDevMode(t *testing.T) {
 		t.Fatalf("workspaces not an array: %T", resp["workspaces"])
 	}
 	t.Logf("workspaces count: %d", len(wss))
+}
+
+// randSuffix returns a short random hex string for unique workspace IDs in tests.
+func randSuffix() string {
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+// injectClaims injects arbitrary JWT claims into a request context.
+// Use this instead of injectDevClaims when you need a specific identity.
+func injectClaims(r *http.Request, sub string, roles []string) *http.Request {
+	c := &auth.Claims{
+		Sub:               sub,
+		Email:             sub + "@example.com",
+		PreferredUsername: sub,
+		Roles:             roles,
+	}
+	return r.WithContext(auth.WithClaims(r.Context(), c))
+}
+
+// withWorkspace injects the active workspace into a request context.
+func withWorkspace(r *http.Request, ws string) *http.Request {
+	return r.WithContext(auth.WithWorkspace(r.Context(), ws))
+}
+
+// TestTaskCrossTenantIsolation verifies that a caller in workspace B cannot
+// read or list runs for a task that belongs to workspace A (IDOR fix).
+func TestTaskCrossTenantIsolation(t *testing.T) {
+	s := openTestDB(t)
+	auth.SetAdminEnv("")
+	auth.SetAdminChecker(s)
+
+	h := handler.New(s, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+
+	// Inject context directly; no JWT middleware needed.
+	r := chi.NewRouter()
+	r.Get("/tasks/{id}", h.GetTask)
+	r.Get("/tasks/{id}/runs", h.ListRuns)
+
+	// Seed a task in workspace A.
+	wsA := "ws-isol-a-" + randSuffix()
+	wsB := "ws-isol-b-" + randSuffix()
+	task := s.CreateTask(&store.Task{
+		UserID:      wsA,
+		WorkspaceID: wsA,
+		Name:        "secret-task",
+	})
+
+	// --- GET /tasks/{id} as workspace B (non-admin) → 404 ---
+	req := httptest.NewRequest(http.MethodGet, "/tasks/"+task.ID, nil)
+	req = injectClaims(req, wsB, nil) // non-admin
+	req = withWorkspace(req, wsB)     // active workspace = B
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("cross-tenant GET task: want 404, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// --- GET /tasks/{id} as workspace A → 200 ---
+	req2 := httptest.NewRequest(http.MethodGet, "/tasks/"+task.ID, nil)
+	req2 = injectClaims(req2, wsA, nil)
+	req2 = withWorkspace(req2, wsA)
+	rr2 := httptest.NewRecorder()
+	r.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Errorf("same-tenant GET task: want 200, got %d body=%s", rr2.Code, rr2.Body.String())
+	}
+
+	// --- ListRuns for task in workspace A as workspace B → 404 ---
+	req3 := httptest.NewRequest(http.MethodGet, "/tasks/"+task.ID+"/runs", nil)
+	req3 = injectClaims(req3, wsB, nil)
+	req3 = withWorkspace(req3, wsB)
+	rr3 := httptest.NewRecorder()
+	r.ServeHTTP(rr3, req3)
+	if rr3.Code != http.StatusNotFound {
+		t.Errorf("cross-tenant ListRuns: want 404, got %d body=%s", rr3.Code, rr3.Body.String())
+	}
+
+	// --- Admin in workspace B can read workspace A task → 200 ---
+	req4 := httptest.NewRequest(http.MethodGet, "/tasks/"+task.ID, nil)
+	req4 = injectClaims(req4, wsB, []string{"platform-admin"})
+	req4 = withWorkspace(req4, wsB)
+	rr4 := httptest.NewRecorder()
+	r.ServeHTTP(rr4, req4)
+	if rr4.Code != http.StatusOK {
+		t.Errorf("admin cross-tenant GET task: want 200, got %d body=%s", rr4.Code, rr4.Body.String())
+	}
+
+	t.Logf("cross-ws → 404: PASS; same-ws → 200: PASS; admin cross-ws → 200: PASS")
 }
 
 // TestWorkspaceCreateList: POST /v1/workspaces then GET /v1/workspaces must include the new workspace.

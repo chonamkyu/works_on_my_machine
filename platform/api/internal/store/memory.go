@@ -273,6 +273,7 @@ func (m *Memory) DeleteTask(id string) error {
 type ArchivedTask struct {
 	ID           string            `json:"id"`
 	UserID       string            `json:"userId"`
+	WorkspaceID  string            `json:"workspaceId"`
 	Name         string            `json:"name"`
 	Description  string            `json:"description"`
 	Kind         string            `json:"kind"`
@@ -316,7 +317,7 @@ func (m *Memory) ArchiveTask(t *Task, files map[string]string) error {
 
 func (m *Memory) ListArchivedTasks(workspaceID string) []*ArchivedTask {
 	rows, err := m.pool.Query(context.Background(), `
-		SELECT id, user_id, name, description, kind, triggers, capabilities, model_config, files, created_at, deleted_at
+		SELECT id, user_id, workspace_id, name, description, kind, triggers, capabilities, model_config, files, created_at, deleted_at
 		FROM task_archive WHERE workspace_id=$1 ORDER BY deleted_at DESC`, workspaceID)
 	if err != nil {
 		return nil
@@ -326,7 +327,7 @@ func (m *Memory) ListArchivedTasks(workspaceID string) []*ArchivedTask {
 	for rows.Next() {
 		var a ArchivedTask
 		var triggersJSON, capsJSON, modelJSON, filesJSON []byte
-		if err := rows.Scan(&a.ID, &a.UserID, &a.Name, &a.Description, &a.Kind,
+		if err := rows.Scan(&a.ID, &a.UserID, &a.WorkspaceID, &a.Name, &a.Description, &a.Kind,
 			&triggersJSON, &capsJSON, &modelJSON, &filesJSON, &a.CreatedAt, &a.DeletedAt); err != nil {
 			continue
 		}
@@ -341,11 +342,11 @@ func (m *Memory) ListArchivedTasks(workspaceID string) []*ArchivedTask {
 
 func (m *Memory) GetArchivedTask(id string) (*ArchivedTask, error) {
 	row := m.pool.QueryRow(context.Background(), `
-		SELECT id, user_id, name, description, kind, triggers, capabilities, model_config, files, created_at, deleted_at
+		SELECT id, user_id, workspace_id, name, description, kind, triggers, capabilities, model_config, files, created_at, deleted_at
 		FROM task_archive WHERE id=$1`, id)
 	var a ArchivedTask
 	var triggersJSON, capsJSON, modelJSON, filesJSON []byte
-	if err := row.Scan(&a.ID, &a.UserID, &a.Name, &a.Description, &a.Kind,
+	if err := row.Scan(&a.ID, &a.UserID, &a.WorkspaceID, &a.Name, &a.Description, &a.Kind,
 		&triggersJSON, &capsJSON, &modelJSON, &filesJSON, &a.CreatedAt, &a.DeletedAt); err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, ErrNotFound

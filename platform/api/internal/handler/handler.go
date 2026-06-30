@@ -130,6 +130,9 @@ func (h *Handler) lastDryRun(taskID string) *runner.DryRunResult {
 
 func (h *Handler) GetDryRun(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, ok := h.taskForRequest(w, r, id); !ok {
+		return
+	}
 	v := h.lastDryRun(id)
 	if v == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no dry-run yet"})
@@ -146,9 +149,8 @@ func (h *Handler) TriggerDryRun(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "node runner not wired"})
 		return
 	}
-	t, err := h.Store.GetTask(id)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "task not found"})
+	t, ok := h.taskForRequest(w, r, id)
+	if !ok {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
@@ -481,14 +483,20 @@ func (h *Handler) ListSkillProposals(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) AcceptSkillProposal(w http.ResponseWriter, r *http.Request) {
+	// Accepting a global skill proposal is a platform-admin action.
+	if !auth.IsAdmin(r.Context()) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "platform-admin required"})
+		return
+	}
 	id := chi.URLParam(r, "id")
 	p, err := h.Store.GetSkillProposal(id)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 		return
 	}
-	// Write the file to the per-user overlay.
-	dir := perUserSkillsDir(p.UserID)
+	// Write the file to the global skills dir — proposals are global scope,
+	// so we must not write to an attacker-controlled per-user path.
+	dir := perUserSkillsDir(store.GlobalScope)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -506,6 +514,11 @@ func (h *Handler) AcceptSkillProposal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) RejectSkillProposal(w http.ResponseWriter, r *http.Request) {
+	// Rejecting a global skill proposal is a platform-admin action.
+	if !auth.IsAdmin(r.Context()) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "platform-admin required"})
+		return
+	}
 	id := chi.URLParam(r, "id")
 	resolved, err := h.Store.ResolveSkillProposal(id, "rejected")
 	if err != nil {
@@ -693,6 +706,9 @@ func (h *Handler) loadUserProfileMap(userID string) map[string]any {
 
 func (h *Handler) GetVerification(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, ok := h.taskForRequest(w, r, id); !ok {
+		return
+	}
 	v := h.lastVerification(id)
 	if v == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no verification yet"})
@@ -706,6 +722,9 @@ func (h *Handler) GetVerification(w http.ResponseWriter, r *http.Request) {
 // platform's verifications directory.
 func (h *Handler) GetVerificationScreenshot(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, ok := h.taskForRequest(w, r, id); !ok {
+		return
+	}
 	v := h.lastVerification(id)
 	if v == nil || v.ScreenshotPath == "" {
 		http.Error(w, "no screenshot", http.StatusNotFound)
@@ -824,6 +843,59 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
+// --- ownership helpers ------------------------------------------------
+
+// taskForRequest fetches a task by id and enforces that it belongs to the
+// caller's active workspace (admins bypass). Writes 404 and returns ok=false
+// otherwise — 404, not 403, so we don't leak existence across tenants.
+func (h *Handler) taskForRequest(w http.ResponseWriter, r *http.Request, id string) (*store.Task, bool) {
+	t, err := h.Store.GetTask(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return nil, false
+	}
+	ws := auth.MustWorkspaceID(r.Context())
+	if t.WorkspaceID != ws && !auth.IsAdmin(r.Context()) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return nil, false
+	}
+	return t, true
+}
+
+// runForRequest fetches a run by id and enforces workspace ownership via its
+// parent task. Writes 404 and returns ok=false when the run doesn't exist or
+// belongs to a different workspace.
+func (h *Handler) runForRequest(w http.ResponseWriter, r *http.Request, id string) (*store.Run, bool) {
+	run, err := h.Store.GetRun(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return nil, false
+	}
+	ws := auth.MustWorkspaceID(r.Context())
+	if run.WorkspaceID != ws && !auth.IsAdmin(r.Context()) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return nil, false
+	}
+	return run, true
+}
+
+// sessionForRequest fetches a session by id and enforces workspace ownership.
+// Writes 404 and returns ok=false when the session doesn't exist or belongs
+// to a different workspace.
+func (h *Handler) sessionForRequest(w http.ResponseWriter, r *http.Request, id string) (*store.Session, bool) {
+	sess, err := h.Store.GetSession(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return nil, false
+	}
+	ws := auth.MustWorkspaceID(r.Context())
+	if sess.WorkspaceID != ws && !auth.IsAdmin(r.Context()) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return nil, false
+	}
+	return sess, true
+}
+
 // --- tasks ------------------------------------------------------------
 
 func (h *Handler) ListTasks(w http.ResponseWriter, r *http.Request) {
@@ -866,9 +938,8 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) GetTask(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	t, err := h.Store.GetTask(id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
+	t, ok := h.taskForRequest(w, r, id)
+	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, t)
@@ -884,6 +955,9 @@ type updateTaskBody struct {
 
 func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, ok := h.taskForRequest(w, r, id); !ok {
+		return
+	}
 	var body updateTaskBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -918,6 +992,9 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, ok := h.taskForRequest(w, r, id); !ok {
+		return
+	}
 	h.archiveBeforeDelete(id)
 	if err := h.Store.DeleteTask(id); errors.Is(err, store.ErrNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
@@ -971,6 +1048,11 @@ func (h *Handler) GetArchivedTask(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	ws := auth.MustWorkspaceID(r.Context())
+	if a.WorkspaceID != ws && !auth.IsAdmin(r.Context()) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
+		return
+	}
 	writeJSON(w, http.StatusOK, a)
 }
 
@@ -978,6 +1060,9 @@ func (h *Handler) GetArchivedTask(w http.ResponseWriter, r *http.Request) {
 // supervisor stops the daemon on the next reconcile (≤5s).
 func (h *Handler) SetServiceEnabled(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, ok := h.taskForRequest(w, r, id); !ok {
+		return
+	}
 	var body struct {
 		Enabled bool `json:"enabled"`
 	}
@@ -1002,6 +1087,9 @@ func (h *Handler) SetServiceEnabled(w http.ResponseWriter, r *http.Request) {
 // running for this task.
 func (h *Handler) ServiceStatus(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, ok := h.taskForRequest(w, r, id); !ok {
+		return
+	}
 	running := false
 	if h.Services != nil {
 		running = h.Services.IsRunning(id)
@@ -1013,6 +1101,9 @@ func (h *Handler) ServiceStatus(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) SetTriggerEnabled(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, ok := h.taskForRequest(w, r, id); !ok {
+		return
+	}
 	trigID := chi.URLParam(r, "trigId")
 	var body struct {
 		Enabled bool `json:"enabled"`
@@ -1040,9 +1131,8 @@ type triggerRunBody struct {
 
 func (h *Handler) TriggerRun(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	t, err := h.Store.GetTask(id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
+	t, ok := h.taskForRequest(w, r, id)
+	if !ok {
 		return
 	}
 	var body triggerRunBody
@@ -1056,14 +1146,16 @@ func (h *Handler) TriggerRun(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ListRuns(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, ok := h.taskForRequest(w, r, id); !ok {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"runs": h.Store.ListRunsForTask(id)})
 }
 
 func (h *Handler) GetRun(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	run, err := h.Store.GetRun(id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
+	run, ok := h.runForRequest(w, r, id)
+	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"run": run, "logs": h.Store.GetLogs(id)})
@@ -1071,6 +1163,9 @@ func (h *Handler) GetRun(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) CancelRun(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, ok := h.runForRequest(w, r, id); !ok {
+		return
+	}
 	if !h.Runner.Cancel(id) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no active run"})
 		return
@@ -1086,6 +1181,9 @@ func (h *Handler) CancelRun(w http.ResponseWriter, r *http.Request) {
 // the agent actually shipped, not what the runner created.
 func (h *Handler) GetTaskCode(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, ok := h.taskForRequest(w, r, id); !ok {
+		return
+	}
 	dir := h.Files.Dir(id)
 	if _, err := os.Stat(dir); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no code"})
@@ -1140,6 +1238,9 @@ func (h *Handler) GetTaskCode(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) RunStream(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, ok := h.runForRequest(w, r, id); !ok {
+		return
+	}
 	logsCh, cancelLogs := h.Bus.Subscribe("run:log:" + id)
 	stateCh, cancelState := h.Bus.Subscribe("run:state:" + id)
 	defer cancelLogs()
@@ -1174,6 +1275,13 @@ func (h *Handler) RunStream(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) TaskEventsStream(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	// If the caller is authenticated, enforce workspace ownership.
+	// Unauthenticated SSE connections (e.g. iframe polling) pass through.
+	if auth.ClaimsFromCtx(r.Context()) != nil {
+		if _, ok := h.taskForRequest(w, r, id); !ok {
+			return
+		}
+	}
 	triggers, c1 := h.Bus.Subscribe("trigger:fired:" + id)
 	defer c1()
 	flush(w)
@@ -1245,6 +1353,17 @@ type chatMessageBody struct {
 
 func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "sessionId")
+	// Verify session/task belongs to the caller's workspace BEFORE appending
+	// any message — prevents ghost sessions with workspace_id="" from being
+	// created for arbitrary IDs. The 1:1 session==task model means a task
+	// match is sufficient when a bare session row doesn't exist yet.
+	if _, ok := h.sessionForRequest(w, r, sessionID); !ok {
+		// Session may not exist yet as an explicit row when sessionID==taskID.
+		// Fall back to task ownership check.
+		if _, taskOK := h.taskForRequest(w, r, sessionID); !taskOK {
+			return
+		}
+	}
 	var body chatMessageBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -1630,6 +1749,12 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ListChatMessages(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "sessionId")
+	if _, ok := h.sessionForRequest(w, r, sessionID); !ok {
+		// In 1:1 model session == task; fall back to task ownership.
+		if _, taskOK := h.taskForRequest(w, r, sessionID); !taskOK {
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"messages": h.Store.ListMessages(sessionID, 200)})
 }
 
@@ -1716,9 +1841,8 @@ func (h *Handler) RejectEvolutionPR(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ProposeEvolutionPR(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	task, err := h.Store.GetTask(id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
+	task, ok := h.taskForRequest(w, r, id)
+	if !ok {
 		return
 	}
 	h.Engine.ManualPropose(task)
@@ -1901,9 +2025,8 @@ func (h *Handler) DiscoverTasks(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ForkTask(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	src, err := h.Store.GetTask(id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
+	src, ok := h.taskForRequest(w, r, id)
+	if !ok {
 		return
 	}
 	yaml, _ := h.Files.ReadFile(id, "workflow.yaml")
@@ -2008,6 +2131,9 @@ func (h *Handler) ServeDashboard(w http.ResponseWriter, r *http.Request) {
 // allocated. Used by the UIPane "ports" view.
 func (h *Handler) ListTaskPorts(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if _, ok := h.taskForRequest(w, r, id); !ok {
+		return
+	}
 	out := h.Ports.ListForTask(id)
 	writeJSON(w, http.StatusOK, map[string]any{"ports": out})
 }
@@ -2260,8 +2386,11 @@ func ensureChatPort(ports []store.TaskPort) []store.TaskPort {
 // outside the chat UI (CLI, other tasks, MCP server).
 func (h *Handler) TaskChat(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	t, err := h.Store.GetTask(id)
-	if err != nil || !t.HasChatHandler {
+	t, ok := h.taskForRequest(w, r, id)
+	if !ok {
+		return
+	}
+	if !t.HasChatHandler {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "task is not a chat agent (no workflow.chatHandler)"})
 		return
 	}
