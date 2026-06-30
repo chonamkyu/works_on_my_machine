@@ -6,9 +6,16 @@ import (
 	"testing"
 )
 
-type fakeMemberChecker struct{ member bool }
+type fakeMemberChecker struct {
+	member      bool
+	calledWith  struct{ workspaceID, sub string }
+}
 
-func (f *fakeMemberChecker) IsMember(_, _ string) bool { return f.member }
+func (f *fakeMemberChecker) IsMember(workspaceID, sub string) bool {
+	f.calledWith.workspaceID = workspaceID
+	f.calledWith.sub = sub
+	return f.member
+}
 
 func TestWorkspace_NonMember403(t *testing.T) {
 	m := New(false)
@@ -32,6 +39,12 @@ func TestWorkspace_NonMember403(t *testing.T) {
 	}
 	if reached {
 		t.Fatal("handler must NOT be reached when non-member")
+	}
+	if mc.calledWith.workspaceID != "other-workspace" {
+		t.Fatalf("IsMember workspaceID: want %q, got %q", "other-workspace", mc.calledWith.workspaceID)
+	}
+	if mc.calledWith.sub != "user1" {
+		t.Fatalf("IsMember sub: want %q, got %q", "user1", mc.calledWith.sub)
 	}
 }
 
@@ -99,6 +112,12 @@ func TestWorkspace_MemberPasses(t *testing.T) {
 	if gotWS != "other-workspace" {
 		t.Fatalf("want workspace=other-workspace, got %q", gotWS)
 	}
+	if mc.calledWith.workspaceID != "other-workspace" {
+		t.Fatalf("IsMember workspaceID: want %q, got %q", "other-workspace", mc.calledWith.workspaceID)
+	}
+	if mc.calledWith.sub != "user1" {
+		t.Fatalf("IsMember sub: want %q, got %q", "user1", mc.calledWith.sub)
+	}
 }
 
 func TestWorkspace_NoClaims_PassThrough(t *testing.T) {
@@ -108,6 +127,9 @@ func TestWorkspace_NoClaims_PassThrough(t *testing.T) {
 	reached := false
 	h := m.Workspace(mc)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reached = true
+		if ws := WorkspaceID(r.Context()); ws != "" {
+			t.Fatalf("want WorkspaceID=\"\", got %q", ws)
+		}
 	}))
 
 	req := httptest.NewRequest("GET", "/", nil)
