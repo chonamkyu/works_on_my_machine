@@ -109,3 +109,52 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
+
+var adminEnv = map[string]bool{}
+
+func SetAdminEnv(csv string) {
+	adminEnv = map[string]bool{}
+	for _, u := range strings.Split(csv, ",") {
+		if u = strings.TrimSpace(u); u != "" {
+			adminEnv[u] = true
+		}
+	}
+}
+
+type AdminChecker interface{ IsAdminDB(sub string) bool }
+
+var adminChecker AdminChecker
+
+func SetAdminChecker(c AdminChecker) { adminChecker = c }
+
+func IsAdmin(ctx context.Context) bool {
+	c := ClaimsFromCtx(ctx)
+	if c == nil {
+		return false
+	}
+	if adminEnv[c.Sub] || adminEnv[c.PreferredUsername] {
+		return true
+	}
+	if c.HasRole("platform-admin") {
+		return true
+	}
+	for _, g := range c.Groups {
+		if strings.TrimPrefix(g, "/") == "platform-admin" {
+			return true
+		}
+	}
+	if adminChecker != nil && adminChecker.IsAdminDB(c.Sub) {
+		return true
+	}
+	return false
+}
+
+func (m *Middleware) AdminOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !IsAdmin(r.Context()) {
+			writeErr(w, http.StatusForbidden, "platform-admin required")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
