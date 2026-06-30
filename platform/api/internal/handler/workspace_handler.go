@@ -105,10 +105,16 @@ func (h *Handler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListMembers returns all members of a workspace.
+// Caller must be a member of the workspace or a platform admin.
 //
 // GET /v1/workspaces/{id}/members
 func (h *Handler) ListMembers(w http.ResponseWriter, r *http.Request) {
 	wsID := chi.URLParam(r, "id")
+	caller := auth.MustUserID(r.Context())
+	if !auth.IsAdmin(r.Context()) && !h.Store.IsMember(wsID, caller) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "not a member of this workspace"})
+		return
+	}
 	members := h.Store.ListMembers(wsID)
 	if members == nil {
 		members = []*store.Member{}

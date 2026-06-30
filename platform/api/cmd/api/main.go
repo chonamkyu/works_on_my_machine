@@ -200,7 +200,7 @@ func main() {
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"http://localhost:5173"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Workspace-ID"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
@@ -220,7 +220,7 @@ func main() {
 		r.Patch("/tasks/{id}", h.UpdateTask)
 		r.Delete("/tasks/{id}", h.DeleteTask)
 		r.Post("/tasks/{id}/runs", h.TriggerRun)
-		r.Get("/tasks/{id}/events", h.TaskEventsStream)
+		// SSE routes moved to optional-auth group below
 		r.Get("/tasks/{id}/code", h.GetTaskCode)
 		r.Get("/tasks/{id}/runs", h.ListRuns)
 		r.Patch("/tasks/{id}/triggers/{trigId}", h.SetTriggerEnabled)
@@ -256,9 +256,7 @@ func main() {
 
 		r.Get("/runs/{id}", h.GetRun)
 		r.Post("/runs/{id}/cancel", h.CancelRun)
-		r.Get("/runs/{id}/stream", h.RunStream)
-
-		r.Get("/users/{id}/activity", h.ActivityStream)
+		// SSE routes moved to optional-auth group below
 
 		r.Post("/chat/{sessionId}/messages", h.ChatMessage)
 		r.Post("/tasks/{id}/chat", h.TaskChat)
@@ -295,6 +293,17 @@ func main() {
 		r.Post("/workspaces/{id}/members", h.InviteMember)
 		r.Delete("/workspaces/{id}/members/{uid}", h.RemoveMember)
 		r.Get("/workspaces/{id}/members", h.ListMembers)
+
+		// SSE / streaming routes: use Optional auth so EventSource without an
+		// Authorization header is not rejected; Workspace resolution still runs
+		// (it is a no-op when there are no claims).
+		r.Group(func(r chi.Router) {
+			r.Use(authMW.Optional)
+			r.Use(func(next http.Handler) http.Handler { return authMW.Workspace(taskStore)(next) })
+			r.Get("/tasks/{id}/events", h.TaskEventsStream)
+			r.Get("/runs/{id}/stream", h.RunStream)
+			r.Get("/users/{id}/activity", h.ActivityStream)
+		})
 
 		// Admin sub-group (guarded by AdminOnly middleware)
 		r.Group(func(r chi.Router) {
