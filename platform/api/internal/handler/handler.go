@@ -896,6 +896,24 @@ func (h *Handler) sessionForRequest(w http.ResponseWriter, r *http.Request, id s
 	return sess, true
 }
 
+// sessionOwned is a non-writing session lookup that distinguishes three cases:
+//   - (sess, true,  true)  — session exists and belongs to caller's workspace
+//   - (nil,  true,  false) — session exists but is owned by a different workspace
+//   - (nil,  false, false) — session row does not exist at all
+//
+// It never writes to the ResponseWriter; callers decide what to do with each case.
+func (h *Handler) sessionOwned(r *http.Request, id string) (*store.Session, bool, bool) {
+	sess, err := h.Store.GetSession(id)
+	if err != nil {
+		return nil, false, false // not found
+	}
+	ws := auth.MustWorkspaceID(r.Context())
+	if sess.WorkspaceID != ws && !auth.IsAdmin(r.Context()) {
+		return nil, true, false // found but wrong workspace
+	}
+	return sess, true, true
+}
+
 // --- tasks ------------------------------------------------------------
 
 func (h *Handler) ListTasks(w http.ResponseWriter, r *http.Request) {
@@ -1357,9 +1375,19 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 	// any message — prevents ghost sessions with workspace_id="" from being
 	// created for arbitrary IDs. The 1:1 session==task model means a task
 	// match is sufficient when a bare session row doesn't exist yet.
-	if _, ok := h.sessionForRequest(w, r, sessionID); !ok {
-		// Session may not exist yet as an explicit row when sessionID==taskID.
-		// Fall back to task ownership check.
+	//
+	// Use the non-writing sessionOwned so that when the session row simply
+	// doesn't exist yet (first message to a task), we can fall through to the
+	// task ownership check without having already sent a 404 response.
+	_, found, owned := h.sessionOwned(r, sessionID)
+	if found && !owned {
+		// Session exists but belongs to a different workspace — hard 404.
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	if !found {
+		// Session row doesn't exist yet (first-message-to-task flow where
+		// sessionID == taskID). Fall back to task ownership check.
 		if _, taskOK := h.taskForRequest(w, r, sessionID); !taskOK {
 			return
 		}
@@ -1749,7 +1777,14 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ListChatMessages(w http.ResponseWriter, r *http.Request) {
 	sessionID := chi.URLParam(r, "sessionId")
-	if _, ok := h.sessionForRequest(w, r, sessionID); !ok {
+	// Use non-writing sessionOwned to avoid double-write when the session row
+	// doesn't exist yet (first-message-to-task flow where sessionID == taskID).
+	_, found, owned := h.sessionOwned(r, sessionID)
+	if found && !owned {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	if !found {
 		// In 1:1 model session == task; fall back to task ownership.
 		if _, taskOK := h.taskForRequest(w, r, sessionID); !taskOK {
 			return

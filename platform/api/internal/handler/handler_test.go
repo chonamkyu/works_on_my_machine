@@ -244,3 +244,78 @@ func TestWorkspaceCreateList(t *testing.T) {
 		t.Errorf("created workspace %s not found in list; got %+v", ws.ID, listResp.Workspaces)
 	}
 }
+
+// TestChatFirstMessageToTask verifies the "first message to a task" flow:
+// when sessionID == taskID and no explicit session row exists yet, POST /chat/<taskID>/messages
+// must succeed (200, no 404), and the response must be a single well-formed JSON body.
+// A cross-workspace request to the same task ID must still return 404 exactly once.
+func TestChatFirstMessageToTask(t *testing.T) {
+	s := openTestDB(t)
+	auth.SetAdminEnv("")
+	auth.SetAdminChecker(s)
+
+	h := handler.New(s, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+
+	r := chi.NewRouter()
+	r.Post("/v1/chat/{sessionId}/messages", h.ChatMessage)
+	r.Get("/v1/chat/{sessionId}/messages", h.ListChatMessages)
+
+	wsA := "ws-chat-a-" + randSuffix()
+	wsB := "ws-chat-b-" + randSuffix()
+
+	// Create a task in workspace A (no session row — simulates first-message flow).
+	task := s.CreateTask(&store.Task{
+		UserID:      wsA,
+		WorkspaceID: wsA,
+		Name:        "chat-task",
+	})
+
+	// --- POST /v1/chat/<taskID>/messages as workspace A → must succeed (not 404) ---
+	body := `{"content":"hello"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/"+task.ID+"/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = injectClaims(req, wsA, nil)
+	req = withWorkspace(req, wsA)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	if rr.Code == http.StatusNotFound {
+		t.Errorf("first-message-to-task: want non-404, got 404; double-write regression? body=%s", rr.Body.String())
+	}
+	// Ensure response is valid JSON (single write — no double-write garbage).
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Errorf("first-message-to-task: response is not valid JSON (double-write?): %v; body=%q", err, rr.Body.String())
+	}
+
+	// --- GET /v1/chat/<taskID>/messages as workspace A → must succeed ---
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/chat/"+task.ID+"/messages", nil)
+	req2 = injectClaims(req2, wsA, nil)
+	req2 = withWorkspace(req2, wsA)
+	rr2 := httptest.NewRecorder()
+	r.ServeHTTP(rr2, req2)
+	if rr2.Code == http.StatusNotFound {
+		t.Errorf("ListChatMessages first-message-to-task: want non-404, got 404; body=%s", rr2.Body.String())
+	}
+	var listResp map[string]any
+	if err := json.Unmarshal(rr2.Body.Bytes(), &listResp); err != nil {
+		t.Errorf("ListChatMessages: response is not valid JSON: %v; body=%q", err, rr2.Body.String())
+	}
+
+	// --- Cross-workspace: workspace B posting to workspace A's task → single 404 ---
+	req3 := httptest.NewRequest(http.MethodPost, "/v1/chat/"+task.ID+"/messages", strings.NewReader(body))
+	req3.Header.Set("Content-Type", "application/json")
+	req3 = injectClaims(req3, wsB, nil)
+	req3 = withWorkspace(req3, wsB)
+	rr3 := httptest.NewRecorder()
+	r.ServeHTTP(rr3, req3)
+	if rr3.Code != http.StatusNotFound {
+		t.Errorf("cross-workspace ChatMessage: want 404, got %d; body=%s", rr3.Code, rr3.Body.String())
+	}
+	// Must be valid single JSON (no double-write even for the 404 path).
+	var errResp map[string]any
+	if err := json.Unmarshal(rr3.Body.Bytes(), &errResp); err != nil {
+		t.Errorf("cross-workspace ChatMessage: 404 response is not valid JSON (double-write?): %v; body=%q", err, rr3.Body.String())
+	}
+
+	t.Logf("first-message-to-task → %d: PASS; cross-ws → 404: PASS", rr.Code)
+}
