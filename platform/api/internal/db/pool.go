@@ -79,6 +79,9 @@ func findMigrationsDir() (string, error) {
 		filepath.Join(cwd, "internal", "db", "migrations"),
 		filepath.Join(cwd, "api", "internal", "db", "migrations"),
 		filepath.Join(cwd, "..", "api", "internal", "db", "migrations"),
+		filepath.Join(cwd, "..", "db", "migrations"),
+		filepath.Join(cwd, "..", "..", "db", "migrations"),
+		filepath.Join(cwd, "..", "..", "..", "internal", "db", "migrations"),
 	}
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
