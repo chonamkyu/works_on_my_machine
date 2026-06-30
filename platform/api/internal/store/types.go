@@ -7,8 +7,6 @@ import (
 
 var ErrNotFound = errors.New("not found")
 
-const DefaultUserID = "u_local"
-
 // GlobalScope is used by background processes (skill evolver, etc.) that are
 // not scoped to a specific user workspace.
 const GlobalScope = "_global"
