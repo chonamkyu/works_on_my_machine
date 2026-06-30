@@ -29,3 +29,6 @@ coverage/
 # local platform state
 .platform/
 platform-data/
+
+# superpowers SDD scratch
+.superpowers/
