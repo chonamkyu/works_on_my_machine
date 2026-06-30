@@ -539,7 +539,8 @@ export function CapsTab({ task }: { task: Task }) {
   );
 }
 
-function ModelTab({ task, onChanged }: { task: Task; onChanged: () => Promise<void> }) {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function ModelTab({ task, onChanged }: { task: Task; onChanged: () => Promise<void> }) {
   const [models, setModels] = useState<Model[]>([]);
   const [busy, setBusy] = useState(false);
 

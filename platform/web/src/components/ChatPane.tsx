@@ -23,8 +23,8 @@ interface Message {
 export function ChatPane({
   sessionId,
   taskName,
-  taskId,
-  taskKind,
+  taskId: _taskId,
+  taskKind: _taskKind,
   paneOpen,
   onExpandPane,
   onRenameTask,

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useAuth } from "react-oidc-context";
 import type { Task, SSEMessage } from "./lib/api";
 import { api, subscribe } from "./lib/api";
+import { devMode, setAuthToken } from "./lib/auth";
 import { TopBar } from "./components/TopBar";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
@@ -174,6 +176,7 @@ export function App() {
 
   return (
     <div className="h-full flex flex-col bg-canvas text-ink">
+      {!devMode && <AuthTokenSync />}
       <TopBar
         onOpenPalette={() => setPaletteOpen(true)}
         onOpenSettings={() => setOverlay("settings")}
@@ -256,6 +259,17 @@ export function App() {
       />
     </div>
   );
+}
+
+/** Syncs the OIDC access token into the module-level holder in auth.ts so
+ *  that api.ts can attach it without needing React context. Only rendered
+ *  when AuthProvider is in the tree (i.e. NOT in devMode). */
+function AuthTokenSync() {
+  const auth = useAuth();
+  useEffect(() => {
+    setAuthToken(auth.user?.access_token);
+  }, [auth.user?.access_token]);
+  return null;
 }
 
 function EmptyChat({ onNewTask }: { onNewTask: () => Promise<void> }) {

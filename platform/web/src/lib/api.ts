@@ -63,9 +63,16 @@ export interface Session {
   createdAt: string;
 }
 
+import { getAuthToken, getActiveWorkspace } from "./auth";
+
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getAuthToken();
+  const workspace = getActiveWorkspace();
+  const extraHeaders: Record<string, string> = {};
+  if (token) extraHeaders["Authorization"] = `Bearer ${token}`;
+  if (workspace) extraHeaders["X-Workspace-ID"] = workspace;
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...extraHeaders },
     ...init,
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText} ${path}`);
@@ -237,7 +244,15 @@ export const api = {
     }),
   listTaskPorts: (taskId: string) =>
     http<{ ports: { TaskID: string; Name: string; Role: string; Port: number }[] }>(`/v1/tasks/${taskId}/ports`),
+  listWorkspaces: () => http<{ workspaces: Workspace[] }>("/v1/workspaces"),
 };
+
+export interface Workspace {
+  id: string;
+  name: string;
+  kind: "personal" | "team" | string;
+  createdAt: string;
+}
 
 export interface SSEMessage {
   channel: string;
@@ -248,7 +263,18 @@ export function subscribe(
   path: string,
   onMessage: (msg: SSEMessage) => void,
 ): () => void {
-  const es = new EventSource(path);
+  const token = getAuthToken();
+  const workspace = getActiveWorkspace();
+  let url = path;
+  if (token) {
+    const sep = url.includes("?") ? "&" : "?";
+    url = `${url}${sep}access_token=${encodeURIComponent(token)}`;
+  }
+  if (workspace) {
+    const sep = url.includes("?") ? "&" : "?";
+    url = `${url}${sep}ws=${encodeURIComponent(workspace)}`;
+  }
+  const es = new EventSource(url);
   es.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data) as SSEMessage;
