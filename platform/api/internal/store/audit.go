@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"time"
 )
 
@@ -54,10 +55,10 @@ func (m *Memory) ListAudit(workspaceID string, limit int) []*AuditEntry {
 	var rows interface {
 		Next() bool
 		Scan(dest ...any) error
+		Err() error
 		Close()
 	}
 
-	var err error
 	if workspaceID == "" {
 		r, qErr := m.pool.Query(context.Background(), `
 			SELECT id, actor_sub, actor_email, action, resource_type, resource_id, resource_name, workspace_id, details, created_at
@@ -68,7 +69,6 @@ func (m *Memory) ListAudit(workspaceID string, limit int) []*AuditEntry {
 			return nil
 		}
 		rows = r
-		err = qErr
 	} else {
 		r, qErr := m.pool.Query(context.Background(), `
 			SELECT id, actor_sub, actor_email, action, resource_type, resource_id, resource_name, workspace_id, details, created_at
@@ -80,10 +80,6 @@ func (m *Memory) ListAudit(workspaceID string, limit int) []*AuditEntry {
 			return nil
 		}
 		rows = r
-		err = qErr
-	}
-	if err != nil {
-		return nil
 	}
 	defer rows.Close()
 
@@ -105,6 +101,9 @@ func (m *Memory) ListAudit(workspaceID string, limit int) []*AuditEntry {
 			e.Details = map[string]any{}
 		}
 		out = append(out, &e)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("ListAudit: rows err: %v", err)
 	}
 	return out
 }
