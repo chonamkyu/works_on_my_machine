@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 
+	"github.com/nk/platform/api/internal/auth"
 	"github.com/nk/platform/api/internal/db"
 	"github.com/nk/platform/api/internal/generator"
 	"github.com/nk/platform/api/internal/handler"
@@ -37,6 +38,10 @@ func main() {
 
 	taskStore := store.NewMemory(pool)
 	taskStore.Seed(ctx)
+
+	authMW := auth.New(os.Getenv("PLATFORM_AUTH_DEV") == "1")
+	auth.SetAdminEnv(os.Getenv("PLATFORM_ADMIN_USERS"))
+	auth.SetAdminChecker(taskStore)
 
 	bus := store.NewBus()
 	bus.AttachPg(pool)
@@ -205,6 +210,10 @@ func main() {
 	r.Get("/oauth/{provider}/callback", h.OAuthCallback)
 
 	r.Route("/v1", func(r chi.Router) {
+		r.Use(authMW.Authenticate)
+		r.Use(h.UpsertUserMiddleware)
+		r.Use(func(next http.Handler) http.Handler { return authMW.Workspace(taskStore)(next) })
+
 		r.Get("/tasks", h.ListTasks)
 		r.Post("/tasks", h.CreateTask)
 		r.Get("/tasks/{id}", h.GetTask)
@@ -275,11 +284,28 @@ func main() {
 
 		r.Get("/oauth/providers", h.ListOAuthProviders)
 		r.Post("/oauth/start", h.StartOAuth)
-		r.Post("/admin/slack/provision", h.ProvisionSlackApp)
-		r.Post("/admin/slack/refresh-scopes", h.RefreshSlackScopes)
 
 		r.Get("/discover", h.DiscoverTasks)
 		r.Post("/tasks/{id}/fork", h.ForkTask)
+
+		// New: me + workspaces
+		r.Get("/me", h.Me)
+		r.Get("/workspaces", h.ListWorkspaces)
+		r.Post("/workspaces", h.CreateWorkspace)
+		r.Post("/workspaces/{id}/members", h.InviteMember)
+		r.Delete("/workspaces/{id}/members/{uid}", h.RemoveMember)
+		r.Get("/workspaces/{id}/members", h.ListMembers)
+
+		// Admin sub-group (guarded by AdminOnly middleware)
+		r.Group(func(r chi.Router) {
+			r.Use(authMW.AdminOnly)
+			r.Post("/admin/slack/provision", h.ProvisionSlackApp)
+			r.Post("/admin/slack/refresh-scopes", h.RefreshSlackScopes)
+			r.Get("/admin/users", h.ListUsers)
+			r.Post("/admin/users/{sub}/admin", h.SetUserAdmin)
+			r.Post("/admin/users/{sub}/disabled", h.SetUserDisabled)
+			r.Get("/admin/audit", h.ListAudit)
+		})
 	})
 
 	// All HTTP methods need to reverse-proxy through to the workflow — the
