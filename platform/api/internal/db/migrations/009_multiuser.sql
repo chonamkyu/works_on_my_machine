@@ -16,13 +16,13 @@ CREATE TABLE IF NOT EXISTS workspaces (
     id          text PRIMARY KEY,            -- personal workspace id == user sub
     name        text NOT NULL,
     kind        text NOT NULL DEFAULT 'personal', -- 'personal' | 'shared'
-    owner_sub   text NOT NULL,
+    owner_sub   text NOT NULL REFERENCES users(sub) ON DELETE CASCADE,
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS workspace_members (
     workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    user_id      text NOT NULL,              -- user sub
+    user_id      text NOT NULL REFERENCES users(sub) ON DELETE CASCADE,
     role         text NOT NULL DEFAULT 'member', -- 'owner' | 'member' | 'viewer'
     added_at     timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (workspace_id, user_id)
