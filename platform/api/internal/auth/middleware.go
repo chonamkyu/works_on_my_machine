@@ -110,6 +110,39 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// MemberChecker is satisfied by any store that can verify workspace membership.
+type MemberChecker interface {
+	IsMember(workspaceID, sub string) bool
+}
+
+// Workspace resolves the caller's active workspace from the X-Workspace-ID header.
+// - Empty or equal to the caller's sub → personal workspace (sub).
+// - Different workspace → mc.IsMember must be true, else 403.
+// - No claims in context (unauthenticated) → pass through unchanged.
+func (m *Middleware) Workspace(mc MemberChecker) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			c := ClaimsFromCtx(r.Context())
+			if c == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+			wsID := r.Header.Get("X-Workspace-ID")
+			if wsID == "" || wsID == c.Sub {
+				r = r.WithContext(WithWorkspace(r.Context(), c.Sub))
+				next.ServeHTTP(w, r)
+				return
+			}
+			if !mc.IsMember(wsID, c.Sub) {
+				writeErr(w, http.StatusForbidden, "not a member of this workspace")
+				return
+			}
+			r = r.WithContext(WithWorkspace(r.Context(), wsID))
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 var adminEnv = map[string]bool{}
 
 func SetAdminEnv(csv string) {
