@@ -56,6 +56,9 @@ func (s *EvolutionStore) Create(pr *EvolutionPR) *EvolutionPR {
 	if wsID == "" {
 		wsID = pr.UserID // backward-compat fallback
 	}
+	if pr.BasedOnReflections == nil {
+		pr.BasedOnReflections = []string{}
+	}
 	_, _ = s.pool.Exec(context.Background(), `
 		INSERT INTO evolution_prs (id, task_id, user_id, workspace_id, state, reason, rationale, diff_summary, self_review,
 		                         old_main_ts, new_main_ts, old_workflow_yaml, new_workflow_yaml,
@@ -69,7 +72,7 @@ func (s *EvolutionStore) Create(pr *EvolutionPR) *EvolutionPR {
 
 func (s *EvolutionStore) Get(id string) (*EvolutionPR, error) {
 	row := s.pool.QueryRow(context.Background(), `
-		SELECT id, task_id, user_id, state, reason, rationale, diff_summary, self_review,
+		SELECT id, task_id, user_id, workspace_id, state, reason, rationale, diff_summary, self_review,
 		       old_main_ts, new_main_ts, old_workflow_yaml, new_workflow_yaml,
 		       based_on_reflections, created_at, resolved_at
 		FROM evolution_prs WHERE id=$1`, id)
@@ -92,7 +95,7 @@ func (s *EvolutionStore) Resolve(id string, state EvolutionPRState) (*EvolutionP
 
 func (s *EvolutionStore) List(workspaceID string) []*EvolutionPR {
 	rows, err := s.pool.Query(context.Background(), `
-		SELECT id, task_id, user_id, state, reason, rationale, diff_summary, self_review,
+		SELECT id, task_id, user_id, workspace_id, state, reason, rationale, diff_summary, self_review,
 		       old_main_ts, new_main_ts, old_workflow_yaml, new_workflow_yaml,
 		       based_on_reflections, created_at, resolved_at
 		FROM evolution_prs WHERE workspace_id=$1 ORDER BY created_at DESC LIMIT 100`, workspaceID)
@@ -120,7 +123,7 @@ func (s *EvolutionStore) PendingForTask(taskID string) int {
 func scanEvolution(s rowScanner) (*EvolutionPR, error) {
 	var pr EvolutionPR
 	var state string
-	if err := s.Scan(&pr.ID, &pr.TaskID, &pr.UserID, &state, &pr.Reason, &pr.Rationale, &pr.DiffSummary, &pr.SelfReview,
+	if err := s.Scan(&pr.ID, &pr.TaskID, &pr.UserID, &pr.WorkspaceID, &state, &pr.Reason, &pr.Rationale, &pr.DiffSummary, &pr.SelfReview,
 		&pr.OldMainTs, &pr.NewMainTs, &pr.OldWorkflowYaml, &pr.NewWorkflowYaml,
 		&pr.BasedOnReflections, &pr.CreatedAt, &pr.ResolvedAt); err != nil {
 		return nil, err

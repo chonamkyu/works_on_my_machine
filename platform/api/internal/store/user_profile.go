@@ -137,11 +137,11 @@ func (m *Memory) ListProfileSuggestions(workspaceID, status string) []*ProfileSu
 // ResolveProfileSuggestion marks a suggestion accepted or rejected. On accept
 // the value is also written into user_profile via a separate UpsertUserProfile
 // call by the handler.
-func (m *Memory) ResolveProfileSuggestion(id, status string) (*ProfileSuggestion, error) {
+func (m *Memory) ResolveProfileSuggestion(id, status, workspaceID string) (*ProfileSuggestion, error) {
 	row := m.pool.QueryRow(context.Background(), `
-		UPDATE user_profile_suggestions SET status=$1, resolved_at=now() WHERE id=$2
+		UPDATE user_profile_suggestions SET status=$1, resolved_at=now() WHERE id=$2 AND workspace_id=$3
 		RETURNING id, user_id, field, value, source, session_id, status, created_at, resolved_at`,
-		status, id)
+		status, id, workspaceID)
 	var s ProfileSuggestion
 	var sess *string
 	var resolved *time.Time

@@ -237,8 +237,8 @@ func (s *CredentialStore) ResolveDefaultFull(workspaceID, connector string) (str
 	return label, val, primary, err
 }
 
-func (s *CredentialStore) Delete(id string) error {
-	tag, err := s.pool.Exec(context.Background(), `DELETE FROM credentials WHERE id=$1`, id)
+func (s *CredentialStore) Delete(id, workspaceID string) error {
+	tag, err := s.pool.Exec(context.Background(), `DELETE FROM credentials WHERE id=$1 AND workspace_id=$2`, id, workspaceID)
 	if err != nil {
 		return err
 	}

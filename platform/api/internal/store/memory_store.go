@@ -100,8 +100,8 @@ func nullableString(s string) any {
 	return s
 }
 
-func (m *MemoryStore) Delete(id string) bool {
-	tag, err := m.pool.Exec(context.Background(), `DELETE FROM memory_entries WHERE id=$1`, id)
+func (m *MemoryStore) Delete(id, workspaceID string) bool {
+	tag, err := m.pool.Exec(context.Background(), `DELETE FROM memory_entries WHERE id=$1 AND workspace_id=$2`, id, workspaceID)
 	if err != nil {
 		return false
 	}
