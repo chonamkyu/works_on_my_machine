@@ -28,3 +28,24 @@ func TestDecodeJWT_RejectsMalformed(t *testing.T) {
 		t.Fatal("expected error for malformed token")
 	}
 }
+
+func TestDecodeJWT_AggregatesResourceAccessRoles(t *testing.T) {
+	// Test that roles from resource_access.<client>.roles are aggregated alongside realm_access.roles.
+	// Payload: {"sub":"u2","resource_access":{"platform":{"roles":["editor"]}},"realm_access":{"roles":["base"]}}
+	tok := "h." +
+		"eyJzdWIiOiJ1MiIsInJlc291cmNlX2FjY2VzcyI6eyJwbGF0Zm9ybSI6eyJyb2xlcyI6WyJlZGl0b3IiXX19LCJyZWFsbV9hY2Nlc3MiOnsicm9sZXMiOlsiYmFzZSJdfX0" +
+		".s"
+	c, err := DecodeJWT(tok)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if c.Sub != "u2" {
+		t.Fatalf("expected sub u2, got %q", c.Sub)
+	}
+	if !c.HasRole("editor") {
+		t.Fatalf("expected editor role from resource_access: %v", c.Roles)
+	}
+	if !c.HasRole("base") {
+		t.Fatalf("expected base role from realm_access: %v", c.Roles)
+	}
+}
