@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "react-oidc-context";
 import type { Task, SSEMessage } from "./lib/api";
-import { api, subscribe } from "./lib/api";
+import { api, subscribe, establishProxySession } from "./lib/api";
 import { devMode, setAuthToken, getActiveWorkspace } from "./lib/auth";
 import { TopBar } from "./components/TopBar";
 import { Sidebar } from "./components/Sidebar";
@@ -266,6 +266,11 @@ function AuthTokenSync() {
   const auth = useAuth();
   useEffect(() => {
     setAuthToken(auth.user?.access_token);
+    if (auth.user?.access_token) {
+      establishProxySession().catch((err) =>
+        console.warn("proxy-session:", err),
+      );
+    }
   }, [auth.user?.access_token]);
   return null;
 }

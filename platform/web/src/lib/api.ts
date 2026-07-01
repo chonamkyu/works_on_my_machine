@@ -72,12 +72,17 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
   if (token) extraHeaders["Authorization"] = `Bearer ${token}`;
   if (workspace) extraHeaders["X-Workspace-ID"] = workspace;
   const res = await fetch(path, {
+    credentials: "include",
     headers: { "Content-Type": "application/json", ...extraHeaders },
     ...init,
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText} ${path}`);
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
+}
+
+export async function establishProxySession(): Promise<void> {
+  await http<void>("/v1/proxy-session", { method: "POST" });
 }
 
 export interface MemoryEntry {
