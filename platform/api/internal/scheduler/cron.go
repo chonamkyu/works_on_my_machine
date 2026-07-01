@@ -91,7 +91,7 @@ func (c *Cron) Sync() {
 		if err != nil {
 			continue
 		}
-		id, err := c.cron.AddFunc(spec, c.fireFor(task.ID, triggerID))
+		id, err := c.cron.AddFunc(spec, c.fireFor(task.ID, triggerID, spec))
 		if err != nil {
 			log.Printf("cron: bad spec %q for %s: %v", spec, key, err)
 			continue
@@ -101,7 +101,7 @@ func (c *Cron) Sync() {
 	}
 }
 
-func (c *Cron) fireFor(taskID, triggerID string) func() {
+func (c *Cron) fireFor(taskID, triggerID, spec string) func() {
 	return func() {
 		task, err := c.store.GetTask(taskID)
 		if err != nil {
@@ -109,24 +109,32 @@ func (c *Cron) fireFor(taskID, triggerID string) func() {
 		}
 		c.dispatch.StartRun(task.WorkspaceID, task, "cron:"+triggerID)
 
-		// Record health: compute next fire time from the scheduler entry and
-		// persist. Best-effort — log on failure, never crash the scheduler.
-		key := taskID + "/" + triggerID
-		c.mu.Lock()
-		entryID, ok := c.entries[key]
-		c.mu.Unlock()
-
-		var nextFireAt *time.Time
-		if ok {
-			next := c.cron.Entry(entryID).Next
-			if !next.IsZero() {
-				nextFireAt = &next
-			}
-		}
+		// Record health: compute next fire time from the cron spec directly so
+		// the value is accurate regardless of when robfig/cron recalculates the
+		// entry's internal Next field. Best-effort — log on failure, never crash.
+		nextFireAt := nextFromSpec(spec)
 		if err := c.store.RecordTriggerFire(taskID, triggerID, task.WorkspaceID, nextFireAt, ""); err != nil {
 			log.Printf("cron: record trigger health for %s/%s: %v", taskID, triggerID, err)
 		}
 	}
+}
+
+// nextFromSpec parses spec with the same options as the scheduler (seconds
+// field enabled) and returns the next scheduled time after now, or nil if
+// parsing fails.
+func nextFromSpec(spec string) *time.Time {
+	parser := cron.NewParser(
+		cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
+	)
+	sched, err := parser.Parse(spec)
+	if err != nil {
+		return nil
+	}
+	next := sched.Next(time.Now())
+	if next.IsZero() {
+		return nil
+	}
+	return &next
 }
 
 func splitFields(s string) []string {
