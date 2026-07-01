@@ -15,7 +15,7 @@ import { useEffect, useState, useCallback } from "react";
 import { Plus, Trash2, RefreshCw, Power } from "lucide-react";
 import { clsx } from "clsx";
 import { api } from "../lib/api";
-import type { McpServer, McpToolEntry, McpDailyCount } from "../lib/api";
+import type { McpServer, McpToolEntry, McpDailyCount, McpPingResult } from "../lib/api";
 
 // ---------------------------------------------------------------------------
 // Sparkline — inline SVG bar chart
@@ -128,7 +128,7 @@ export function McpView() {
   const [loading, setLoading] = useState(true);
   const [toolsLoading, setToolsLoading] = useState(false);
   const [pingLoading, setPingLoading] = useState(false);
-  const [pingResult, setPingResult] = useState<{ ok: boolean; latencyMs: number; error?: string } | null>(null);
+  const [pingResult, setPingResult] = useState<McpPingResult | null>(null);
 
   // Admin action state
   const [showRegisterForm, setShowRegisterForm] = useState(false);
@@ -203,7 +203,7 @@ export function McpView() {
       // refresh server list to get updated lastStatus
       await refresh();
     } catch (err) {
-      setPingResult({ ok: false, latencyMs: 0, error: String(err) });
+      setPingResult({ status: "unreachable", toolCount: 0, error: String(err) });
     } finally {
       setPingLoading(false);
     }
@@ -436,14 +436,20 @@ export function McpView() {
                 <div
                   className={clsx(
                     "border rounded p-3 text-xs font-mono",
-                    pingResult.ok
+                    pingResult.status === "ok"
                       ? "border-status-success/30 bg-status-success/10 text-status-success"
                       : "border-status-failed/30 bg-status-failed/10 text-status-failed",
                   )}
                 >
-                  {pingResult.ok
-                    ? `ok · ${pingResult.latencyMs}ms`
-                    : `unreachable${pingResult.error ? ` · ${pingResult.error}` : ""}`}
+                  {pingResult.status === "ok"
+                    ? `ok · ${pingResult.toolCount} tool${pingResult.toolCount !== 1 ? "s" : ""}${
+                        pingResult.serverName
+                          ? ` · ${pingResult.serverName}${
+                              pingResult.serverVersion ? ` ${pingResult.serverVersion}` : ""
+                            }`
+                          : ""
+                      }`
+                    : `${pingResult.status}${pingResult.error ? ` · ${pingResult.error}` : ""}`}
                 </div>
               )}
 

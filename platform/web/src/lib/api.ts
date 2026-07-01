@@ -233,12 +233,11 @@ export interface McpDailyCount {
 }
 
 export interface McpPingResult {
-  ok: boolean;
-  latencyMs: number;
-  error?: string;
+  status: string;
+  toolCount: number;
   serverName?: string;
   serverVersion?: string;
-  toolCount?: number;
+  error?: string;
 }
 
 export const api = {

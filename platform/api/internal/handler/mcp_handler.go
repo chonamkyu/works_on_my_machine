@@ -51,7 +51,7 @@ func (h *Handler) GetMCPServerStats(w http.ResponseWriter, r *http.Request) {
 			days = n
 		}
 	}
-	writeJSON(w, http.StatusOK, h.Store.GetMCPServerStats(id, days))
+	writeJSON(w, http.StatusOK, map[string]any{"stats": h.Store.GetMCPServerStats(id, days)})
 }
 
 // PingMCPServer performs a live health check against the server.
