@@ -32,3 +32,6 @@ platform-data/
 
 # superpowers SDD scratch
 .superpowers/
+
+# TS build cache
+*.tsbuildinfo
