@@ -43,6 +43,9 @@ func main() {
 	authMW := auth.New(os.Getenv("PLATFORM_AUTH_DEV") == "1")
 	auth.SetAdminEnv(os.Getenv("PLATFORM_ADMIN_USERS"))
 	auth.SetAdminChecker(taskStore)
+	if secret := firstNonEmpty(os.Getenv("PLATFORM_PROXY_SECRET"), os.Getenv("PLATFORM_ENCRYPTION_KEY")); secret != "" {
+		auth.SetProxySecret(secret)
+	}
 
 	bus := store.NewBus()
 	bus.AttachPg(pool)
@@ -340,6 +343,7 @@ func main() {
 		r.Post("/workspaces/{id}/members", h.InviteMember)
 		r.Delete("/workspaces/{id}/members/{uid}", h.RemoveMember)
 		r.Get("/workspaces/{id}/members", h.ListMembers)
+		r.Post("/proxy-session", h.SetProxySession)
 
 		// SSE / streaming routes: use Optional auth so EventSource without an
 		// Authorization header is not rejected; Workspace resolution still runs

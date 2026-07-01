@@ -2348,6 +2348,39 @@ func (h *Handler) proxyToTask(w http.ResponseWriter, r *http.Request, taskID, wo
 	proxy.ServeHTTP(w, r)
 }
 
+const proxySessionTTL = 12 * time.Hour
+
+// SetProxySession mints a signed proxy-session cookie (platform_proxy) for the
+// authenticated caller and writes it as an HttpOnly, SameSite=Lax cookie.
+// This allows same-origin browser iframes to carry the cookie automatically
+// without needing to set Authorization headers.
+//
+// Route: POST /v1/proxy-session (requires Authenticate middleware).
+func (h *Handler) SetProxySession(w http.ResponseWriter, r *http.Request) {
+	sub := auth.MustUserID(r.Context())
+	if sub == "" {
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	tok, err := auth.MintProxyToken(sub, proxySessionTTL)
+	if err != nil {
+		http.Error(w, "token mint error", http.StatusInternalServerError)
+		return
+	}
+
+	secure := strings.HasPrefix(os.Getenv("PLATFORM_PUBLIC_URL"), "https")
+	http.SetCookie(w, &http.Cookie{
+		Name:     "platform_proxy",
+		Value:    tok,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   secure,
+		MaxAge:   int(proxySessionTTL.Seconds()),
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ServeDashboard reverse-proxies /d/<task_id>/[<name>/]<rest> to the
 // workflow's HTTP server. This is the legacy alias kept for backward compat.
 // It resolves the task's owning workspace and applies membership authz.

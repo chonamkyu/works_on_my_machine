@@ -526,3 +526,46 @@ func TestCreateTaskAudit(t *testing.T) {
 	}
 	t.Log("task.create audit entry found: PASS")
 }
+
+func TestSetProxySession(t *testing.T) {
+	s := openTestDB(t)
+	auth.SetAdminEnv("")
+	auth.SetAdminChecker(s)
+	auth.SetProxySecret("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+
+	h := handler.New(s, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+
+	// Must be authenticated.
+	req := injectClaims(httptest.NewRequest(http.MethodPost, "/v1/proxy-session", nil), "test-user", nil)
+	rr := httptest.NewRecorder()
+	h.SetProxySession(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("SetProxySession: want 204, got %d body=%q", rr.Code, rr.Body.String())
+	}
+
+	// Response must set platform_proxy cookie.
+	var found bool
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "platform_proxy" {
+			found = true
+			if !c.HttpOnly {
+				t.Error("platform_proxy cookie must be HttpOnly")
+			}
+			if c.Value == "" {
+				t.Error("platform_proxy cookie must have a non-empty value")
+			}
+			// Verify the token is valid and carries the right sub.
+			sub, ok := auth.VerifyProxyToken(c.Value)
+			if !ok {
+				t.Error("platform_proxy cookie token failed VerifyProxyToken")
+			}
+			if sub != "test-user" {
+				t.Errorf("platform_proxy cookie sub: want %q, got %q", "test-user", sub)
+			}
+		}
+	}
+	if !found {
+		t.Error("SetProxySession: no platform_proxy cookie in response")
+	}
+}
