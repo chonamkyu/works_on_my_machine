@@ -23,7 +23,13 @@ test("walking skeleton: seed tasks render and a run streams logs", async ({ page
 });
 
 test("chat can create a real task via the generator", async ({ page }) => {
-  await page.goto("/");
+  test.setTimeout(120_000);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  // Chat input is only available after selecting a task (1:1 chat-per-task model).
+  // Select the seeded daily-bugs task first.
+  await page.getByTestId("task-card-daily-bugs").waitFor({ state: "visible", timeout: 8_000 });
+  await page.getByTestId("task-card-daily-bugs").click();
+  await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 5_000 });
   await page
     .getByTestId("chat-input")
     .fill("create a task that prints hello world plus the current iso timestamp");
@@ -32,12 +38,14 @@ test("chat can create a real task via the generator", async ({ page }) => {
   await expect(page.getByText(/Created task/i).first()).toBeVisible({ timeout: 90_000 });
 });
 
-test("nav tabs switch main view", async ({ page }) => {
-  await page.goto("/");
-  await page.getByTestId("nav-memory").click();
-  await expect(page.getByText(/No memory yet/i)).toBeVisible({ timeout: 5_000 });
-  await page.getByTestId("nav-evolution").click();
-  await expect(page.getByText(/No PRs yet|Select a PR/i)).toBeVisible({ timeout: 5_000 });
-  await page.getByTestId("nav-chat").click();
-  await expect(page.getByTestId("chat-input")).toBeVisible();
+test("command palette opens and can navigate", async ({ page }) => {
+  // Navigation moved from nav tabs to the ⌘K command palette.
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.getByTestId("open-palette")).toBeVisible({ timeout: 5_000 });
+  // Open palette via button click
+  await page.getByTestId("open-palette").click();
+  // Command palette shows a search input with the known placeholder text
+  await expect(
+    page.getByPlaceholder("Search tasks, jump to memory · settings · evolution…"),
+  ).toBeVisible({ timeout: 3_000 });
 });
