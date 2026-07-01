@@ -246,6 +246,48 @@ export interface AdminWorkspace {
   createdAt: string;
 }
 
+export interface AdminTrigger {
+  taskId: string;
+  taskName: string;
+  workspaceId: string;
+  triggerId: string;
+  lastFiredAt?: string;
+  nextFireAt?: string;
+  lastError?: string;
+  updatedAt: string;
+}
+
+export interface SkillProposal {
+  id: string;
+  userId: string;
+  workspaceId: string;
+  skillName: string;
+  skillBody: string;
+  rationale: string;
+  confidence: string;
+  appliesWhen: string;
+  status: "pending" | "accepted" | "rejected" | string;
+  createdAt: string;
+  resolvedAt?: string;
+}
+
+export interface AdminSkillVersion {
+  id: string;
+  name: string;
+  description: string;
+  tags: string[];
+  latestVersion: number;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdminSelfEvolve {
+  proposals: SkillProposal[];
+  evolutionPRs: EvolutionPR[];
+  recentSkillVersions: AdminSkillVersion[];
+}
+
 // ---------------------------------------------------------------------------
 // MCP Server Registry
 // ---------------------------------------------------------------------------
@@ -468,6 +510,10 @@ export const api = {
     }),
   adminListAudit: (limit = 200) =>
     http<{ entries: AuditEntry[] }>(`/v1/admin/audit?limit=${limit}`),
+  adminListTriggers: () =>
+    http<{ triggers: AdminTrigger[] }>("/v1/admin/triggers"),
+  adminSelfEvolve: () =>
+    http<AdminSelfEvolve>("/v1/admin/self-evolve"),
 };
 
 export interface Workspace {

@@ -15,7 +15,15 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { clsx } from "clsx";
 import { api } from "../lib/api";
-import type { AdminOverview, AdminWorkspace, AuditEntry, User } from "../lib/api";
+import type {
+  AdminOverview,
+  AdminWorkspace,
+  AdminTrigger,
+  AdminSelfEvolve,
+  SkillProposal,
+  AuditEntry,
+  User,
+} from "../lib/api";
 
 // ---------------------------------------------------------------------------
 // Sub-tab types
@@ -402,6 +410,343 @@ function AuditTab() {
 }
 
 // ---------------------------------------------------------------------------
+// Triggers tab
+// ---------------------------------------------------------------------------
+
+function triggerHealth(t: AdminTrigger): "green" | "amber" | "red" {
+  if (t.lastError) return "red";
+  if (!t.lastFiredAt) return "amber";
+  return "green";
+}
+
+const HEALTH_DOT: Record<"green" | "amber" | "red", string> = {
+  green: "bg-green-500",
+  amber: "bg-amber-400",
+  red: "bg-red-500",
+};
+
+const HEALTH_LABEL: Record<"green" | "amber" | "red", string> = {
+  green: "healthy",
+  amber: "never fired",
+  red: "error",
+};
+
+function TriggersTab() {
+  const [triggers, setTriggers] = useState<AdminTrigger[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api.adminListTriggers()
+      .then(({ triggers: list }) => setTriggers(list ?? []))
+      .catch(console.error)
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <p className="p-4 text-xs text-ink-subtle">loading…</p>;
+
+  return (
+    <div className="p-4 space-y-3">
+      <div className="flex items-center gap-4">
+        <div className="font-mono text-[10px] uppercase tracking-wider text-ink-subtle">
+          triggers · {triggers.length}
+        </div>
+        <div className="flex items-center gap-3 ml-2">
+          {(["green", "amber", "red"] as const).map((h) => (
+            <span key={h} className="flex items-center gap-1 text-[10px] text-ink-tertiary">
+              <span className={clsx("inline-block w-2 h-2 rounded-full", HEALTH_DOT[h])} />
+              {HEALTH_LABEL[h]}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {triggers.length === 0 ? (
+        <p className="text-xs text-ink-tertiary">No triggers registered across any workspace.</p>
+      ) : (
+        <div className="border border-hairline rounded overflow-hidden">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-hairline bg-surface-2">
+                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary w-6">
+                  {/* health dot */}
+                </th>
+                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">task</th>
+                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">workspace</th>
+                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">trigger id</th>
+                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary whitespace-nowrap">last fired</th>
+                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary whitespace-nowrap">next fire</th>
+                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">last error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {triggers.map((t) => {
+                const health = triggerHealth(t);
+                return (
+                  <tr
+                    key={`${t.taskId}:${t.triggerId}`}
+                    className="border-b border-hairline last:border-0 hover:bg-surface-2/50"
+                  >
+                    <td className="px-3 py-2 text-center">
+                      <span
+                        className={clsx("inline-block w-2 h-2 rounded-full", HEALTH_DOT[health])}
+                        title={HEALTH_LABEL[health]}
+                      />
+                    </td>
+                    <td className="px-3 py-2 text-ink font-medium truncate max-w-[160px]">
+                      {t.taskName || t.taskId}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-ink-tertiary text-[10px] truncate max-w-[120px]">
+                      {t.workspaceId}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-ink-tertiary text-[10px] truncate max-w-[140px]">
+                      {t.triggerId}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-ink-tertiary whitespace-nowrap">
+                      {t.lastFiredAt
+                        ? new Date(t.lastFiredAt).toLocaleString()
+                        : <span className="text-ink-tertiary/50">—</span>}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-ink-tertiary whitespace-nowrap">
+                      {t.nextFireAt
+                        ? new Date(t.nextFireAt).toLocaleString()
+                        : <span className="text-ink-tertiary/50">—</span>}
+                    </td>
+                    <td className="px-3 py-2 text-red-500 truncate max-w-[200px]" title={t.lastError || undefined}>
+                      {t.lastError || <span className="text-ink-tertiary/50">—</span>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Self-Evolve tab
+// ---------------------------------------------------------------------------
+
+const STATUS_BADGE: Record<string, string> = {
+  pending: "bg-amber-100 text-amber-700",
+  accepted: "bg-green-100 text-green-700",
+  rejected: "bg-red-100 text-red-700",
+};
+
+function ProposalCard({
+  proposal,
+  linkedSkill,
+}: {
+  proposal: SkillProposal;
+  linkedSkill?: { name: string; latestVersion: number; updatedAt: string } | null;
+}) {
+  const statusCls = STATUS_BADGE[proposal.status] ?? "bg-surface-2 text-ink-muted";
+  return (
+    <div className="border border-hairline rounded p-3 space-y-1.5 bg-canvas">
+      <div className="flex items-start justify-between gap-2">
+        <span className="font-mono text-[11px] text-ink font-semibold truncate">{proposal.skillName}</span>
+        <span className={clsx("text-[10px] font-mono px-1.5 py-0.5 rounded whitespace-nowrap", statusCls)}>
+          {proposal.status}
+        </span>
+      </div>
+      <p className="text-[11px] text-ink-muted leading-relaxed">{proposal.rationale}</p>
+      <div className="flex flex-wrap items-center gap-3 text-[10px] font-mono text-ink-tertiary">
+        <span>confidence: {proposal.confidence}</span>
+        {proposal.appliesWhen && proposal.appliesWhen !== "always" && (
+          <span>applies when: {proposal.appliesWhen}</span>
+        )}
+        <span>{new Date(proposal.createdAt).toLocaleString()}</span>
+        {proposal.resolvedAt && (
+          <span>resolved: {new Date(proposal.resolvedAt).toLocaleString()}</span>
+        )}
+      </div>
+      {proposal.status === "accepted" && linkedSkill && (
+        <div className="mt-1 flex items-center gap-1.5 text-[10px] text-green-700 font-mono border-t border-hairline pt-1.5">
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-500" />
+          skill registry: {linkedSkill.name} v{linkedSkill.latestVersion}
+          <span className="text-ink-tertiary ml-1">
+            updated {new Date(linkedSkill.updatedAt).toLocaleDateString()}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SelfEvolveTab() {
+  const [data, setData] = useState<AdminSelfEvolve | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api.adminSelfEvolve()
+      .then(setData)
+      .catch(console.error)
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <p className="p-4 text-xs text-ink-subtle">loading…</p>;
+  if (!data) return <p className="p-4 text-xs text-ink-tertiary">Failed to load self-evolve data.</p>;
+
+  const { proposals, evolutionPRs, recentSkillVersions } = data;
+
+  // Build a map from skill name → skill for fast lookup
+  const skillByName = useMemo(() => {
+    const m = new Map<string, (typeof recentSkillVersions)[number]>();
+    for (const s of recentSkillVersions ?? []) {
+      m.set(s.name, s);
+    }
+    return m;
+  }, [recentSkillVersions]);
+
+  const pending = (proposals ?? []).filter((p) => p.status === "pending");
+  const accepted = (proposals ?? []).filter((p) => p.status === "accepted");
+  const rejected = (proposals ?? []).filter((p) => p.status === "rejected");
+
+  return (
+    <div className="p-4 space-y-6">
+      {/* ---- Skill proposals ---- */}
+      <div>
+        <div className="font-mono text-[10px] uppercase tracking-wider text-ink-subtle mb-3">
+          skill proposals · {(proposals ?? []).length}
+        </div>
+
+        {(proposals ?? []).length === 0 ? (
+          <p className="text-xs text-ink-tertiary">No skill proposals yet.</p>
+        ) : (
+          <div className="space-y-4">
+            {pending.length > 0 && (
+              <div>
+                <div className="font-mono text-[10px] uppercase text-amber-600 mb-1.5">
+                  pending · {pending.length}
+                </div>
+                <div className="space-y-2">
+                  {pending.map((p) => (
+                    <ProposalCard key={p.id} proposal={p} linkedSkill={null} />
+                  ))}
+                </div>
+              </div>
+            )}
+            {accepted.length > 0 && (
+              <div>
+                <div className="font-mono text-[10px] uppercase text-green-700 mb-1.5">
+                  accepted · {accepted.length}
+                </div>
+                <div className="space-y-2">
+                  {accepted.map((p) => (
+                    <ProposalCard
+                      key={p.id}
+                      proposal={p}
+                      linkedSkill={skillByName.get(p.skillName) ?? null}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+            {rejected.length > 0 && (
+              <div>
+                <div className="font-mono text-[10px] uppercase text-red-600 mb-1.5">
+                  rejected · {rejected.length}
+                </div>
+                <div className="space-y-2">
+                  {rejected.map((p) => (
+                    <ProposalCard key={p.id} proposal={p} linkedSkill={null} />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ---- Skill registry versions ---- */}
+      <div>
+        <div className="font-mono text-[10px] uppercase tracking-wider text-ink-subtle mb-2">
+          skill registry · {(recentSkillVersions ?? []).length} skills
+        </div>
+        {(recentSkillVersions ?? []).length === 0 ? (
+          <p className="text-xs text-ink-tertiary">No skills in registry.</p>
+        ) : (
+          <div className="border border-hairline rounded overflow-hidden">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-hairline bg-surface-2">
+                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">name</th>
+                  <th className="px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary text-right">version</th>
+                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">description</th>
+                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">updated</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(recentSkillVersions ?? []).map((s) => (
+                  <tr key={s.id} className="border-b border-hairline last:border-0 hover:bg-surface-2/50">
+                    <td className="px-3 py-2 font-mono text-ink font-medium">{s.name}</td>
+                    <td className="px-3 py-2 font-mono text-ink text-right">v{s.latestVersion}</td>
+                    <td className="px-3 py-2 text-ink-muted truncate max-w-[240px]">{s.description}</td>
+                    <td className="px-3 py-2 font-mono text-ink-tertiary whitespace-nowrap">
+                      {new Date(s.updatedAt).toLocaleDateString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* ---- Evolution PRs ---- */}
+      <div>
+        <div className="font-mono text-[10px] uppercase tracking-wider text-ink-subtle mb-2">
+          evolution prs · {(evolutionPRs ?? []).length}
+        </div>
+        {(evolutionPRs ?? []).length === 0 ? (
+          <p className="text-xs text-ink-tertiary">No evolution PRs yet.</p>
+        ) : (
+          <div className="border border-hairline rounded overflow-hidden">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-hairline bg-surface-2">
+                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">id</th>
+                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">task</th>
+                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">state</th>
+                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">reason</th>
+                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">created</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(evolutionPRs ?? []).map((pr) => {
+                  const stateCls = STATUS_BADGE[pr.state] ?? "bg-surface-2 text-ink-muted";
+                  return (
+                    <tr key={pr.id} className="border-b border-hairline last:border-0 hover:bg-surface-2/50">
+                      <td className="px-3 py-2 font-mono text-ink-tertiary text-[10px] truncate max-w-[100px]">
+                        {pr.id}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-ink-tertiary text-[10px] truncate max-w-[120px]">
+                        {pr.taskId}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className={clsx("text-[10px] font-mono px-1.5 py-0.5 rounded", stateCls)}>
+                          {pr.state}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-ink-muted truncate max-w-[200px]">{pr.reason}</td>
+                      <td className="px-3 py-2 font-mono text-ink-tertiary whitespace-nowrap">
+                        {new Date(pr.createdAt).toLocaleDateString()}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // AdminView
 // ---------------------------------------------------------------------------
 
@@ -479,12 +824,8 @@ export function AdminView() {
         {activeTab === "users" && <UsersTab />}
         {activeTab === "workspaces" && <WorkspacesTab />}
         {activeTab === "audit" && <AuditTab />}
-        {activeTab === "triggers" && (
-          <div className="p-4 text-xs text-ink-tertiary">Coming in D3/D4</div>
-        )}
-        {activeTab === "selfevolve" && (
-          <div className="p-4 text-xs text-ink-tertiary">Coming in D4</div>
-        )}
+        {activeTab === "triggers" && <TriggersTab />}
+        {activeTab === "selfevolve" && <SelfEvolveTab />}
       </div>
     </section>
   );
