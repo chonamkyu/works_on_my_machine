@@ -395,6 +395,24 @@ func main() {
 			r.Delete("/skill-repo/{name}", h.DeleteGlobalSkill)
 		})
 
+		// MCP registry — reads open to any authenticated caller.
+		// NOTE: /mcp/tools (static) is registered before /mcp/{id}/tools so chi
+		// routes the literal path correctly (chi prefers static segments over URL
+		// params at the same position, so this ordering is correct).
+		r.Get("/mcp", h.ListMCPServers)
+		r.Get("/mcp/tools", h.ListAllMCPTools) // static before /{id} routes
+		r.Get("/mcp/{id}/tools", h.ListMCPTools)
+		r.Get("/mcp/{id}/stats", h.GetMCPServerStats)
+		r.Post("/mcp/{id}/ping", h.PingMCPServer)
+		r.Post("/mcp/{id}/call", h.CallMCPTool)
+		r.Group(func(r chi.Router) {
+			r.Use(authMW.AdminOnly)
+			r.Post("/mcp", h.CreateMCPServer)
+			r.Put("/mcp/{id}", h.UpdateMCPServer)
+			r.Delete("/mcp/{id}", h.DeleteMCPServer)
+			r.Post("/mcp/{id}/tools/{tool}/disabled", h.SetMCPToolDisabled)
+		})
+
 		// Admin sub-group (guarded by AdminOnly middleware)
 		r.Group(func(r chi.Router) {
 			r.Use(authMW.AdminOnly)
