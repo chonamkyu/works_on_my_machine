@@ -432,6 +432,10 @@ export const api = {
   listTaskPorts: (taskId: string) =>
     http<{ ports: { TaskID: string; Name: string; Role: string; Port: number }[] }>(`/v1/tasks/${taskId}/ports`),
   listWorkspaces: () => http<{ workspaces: Workspace[] }>("/v1/workspaces"),
+  createWorkspace: (name: string) =>
+    http<Workspace>("/v1/workspaces", { method: "POST", body: JSON.stringify({ name }) }),
+  deleteWorkspace: (id: string) =>
+    http<void>(`/v1/workspaces/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   // --- Current user ---
   getMe: () => http<Me>("/v1/me"),
