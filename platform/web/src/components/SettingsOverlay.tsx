@@ -14,8 +14,9 @@ import { DiscoverView } from "./DiscoverView";
 import { SettingsView } from "./SettingsView";
 import { SkillsView } from "./SkillsView";
 import { McpView } from "./McpView";
+import { AdminView } from "./AdminView";
 
-export type OverlayTab = "settings" | "memory" | "evolution" | "discover" | "skills" | "mcp";
+export type OverlayTab = "settings" | "memory" | "evolution" | "discover" | "skills" | "mcp" | "admin";
 
 const TABS: { id: OverlayTab; label: string; hint: string }[] = [
   { id: "settings", label: "Settings", hint: "⌘," },
@@ -24,6 +25,7 @@ const TABS: { id: OverlayTab; label: string; hint: string }[] = [
   { id: "discover", label: "Discover", hint: "" },
   { id: "skills", label: "Skills", hint: "" },
   { id: "mcp", label: "MCP Servers", hint: "" },
+  { id: "admin", label: "Admin", hint: "" },
 ];
 
 interface Props {
@@ -80,6 +82,7 @@ export function SettingsOverlay({ open, tab, onTab, onClose }: Props) {
           {tab === "discover" && <DiscoverView />}
           {tab === "skills" && <SkillsView />}
           {tab === "mcp" && <McpView />}
+          {tab === "admin" && <AdminView />}
         </main>
       </div>
     </div>

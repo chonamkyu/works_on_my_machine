@@ -198,6 +198,54 @@ export interface Me {
 }
 
 // ---------------------------------------------------------------------------
+// Admin API types
+// ---------------------------------------------------------------------------
+
+export interface User {
+  sub: string;
+  email: string;
+  isAdmin: boolean;
+  disabled: boolean;
+  createdAt: string;
+}
+
+export interface AuditEntry {
+  id: string;
+  workspaceId: string;
+  actorSub: string;
+  actorEmail: string;
+  action: string;
+  resourceType: string;
+  resourceId: string;
+  resourceName: string;
+  createdAt: string;
+}
+
+export interface AdminOverview {
+  counts: {
+    users: number;
+    workspaces: number;
+    mcpServers: number;
+    skills: number;
+    runningServices: number;
+    activeRuns: number;
+    pendingProposals: number;
+    pendingEvolutionPRs: number;
+  };
+  recentAudit: AuditEntry[];
+}
+
+export interface AdminWorkspace {
+  id: string;
+  name: string;
+  kind: string;
+  ownerSub: string;
+  memberCount: number;
+  taskCount: number;
+  createdAt: string;
+}
+
+// ---------------------------------------------------------------------------
 // MCP Server Registry
 // ---------------------------------------------------------------------------
 
@@ -401,6 +449,21 @@ export const api = {
     http<void>(`/v1/mcp/${encodeURIComponent(id)}/tools/${encodeURIComponent(tool)}/disabled`, {
       method: "POST",
       body: JSON.stringify({ disabled, reason }),
+    }),
+
+  // --- Admin ---
+  adminOverview: () => http<AdminOverview>("/v1/admin/overview"),
+  adminListWorkspaces: () => http<{ workspaces: AdminWorkspace[] }>("/v1/admin/workspaces"),
+  adminListUsers: () => http<{ users: User[] }>("/v1/admin/users"),
+  adminSetUserAdmin: (sub: string, isAdmin: boolean) =>
+    http<void>(`/v1/admin/users/${encodeURIComponent(sub)}/admin`, {
+      method: "POST",
+      body: JSON.stringify({ isAdmin }),
+    }),
+  adminSetUserDisabled: (sub: string, disabled: boolean) =>
+    http<void>(`/v1/admin/users/${encodeURIComponent(sub)}/disabled`, {
+      method: "POST",
+      body: JSON.stringify({ disabled }),
     }),
 };
 
