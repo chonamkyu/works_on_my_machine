@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Sparkles, KeyRound, ChevronsRight } from "lucide-react";
 import { api, subscribe, type SSEMessage } from "../lib/api";
-import { useGeneration, setGenerating, clearGeneration, getGeneration } from "../lib/generation";
+import { useGeneration, setGenerating, clearGeneration, getGeneration, appendPreview } from "../lib/generation";
 
 const USER_ID = "u_local";
 
@@ -48,16 +48,17 @@ export function ChatPane({
   const [startedAt, setStartedAt] = useState<number | null>(() => getGeneration(sessionId)?.startedAt ?? null);
   const [now, setNow] = useState<number>(() => Date.now());
   const scrollRef = useRef<HTMLDivElement>(null);
+  const restoredFromStore = useRef(false);
 
   const genEntry = useGeneration(sessionId);
-  // Sync accumulated stream preview from the global store into local state.
-  // The App-level SSE accumulator writes deltas even when ChatPane is unmounted,
-  // so on remount pending may be true with accumulated preview in the store.
+  // On first mount with an in-progress generation, restore the accumulated
+  // preview from the store. After that, the local SSE subscription is the
+  // single source of truth for streamPreview — we don't re-sync on every
+  // store update to avoid duplicate deltas.
   useEffect(() => {
-    if (pending && genEntry?.preview !== undefined) {
-      setStreamPreview((current) =>
-        genEntry.preview.length > current.length ? genEntry.preview : current
-      );
+    if (!restoredFromStore.current && pending && genEntry?.preview) {
+      restoredFromStore.current = true;
+      setStreamPreview(genEntry.preview);
     }
   }, [genEntry?.preview, pending]);
 
@@ -67,19 +68,6 @@ export function ChatPane({
     const id = setInterval(() => setNow(Date.now()), 250);
     return () => clearInterval(id);
   }, [pending]);
-
-  // When the user switches sessions, clear all turn-in-flight state so the
-  // new chat doesn't inherit the previous session's "agent drafting" badge,
-  // streamed preview, or progress steps. Any in-flight fetch from the old
-  // session resolves into the void (its setState is ignored after this
-  // effect runs since `pending` is already false for the new mount).
-  useEffect(() => {
-    setPending(false);
-    setStreamPreview("");
-    setProgressSteps([]);
-    setStartedAt(null);
-    setInput("");
-  }, [sessionId]);
 
   // Load history whenever the active session switches.
   useEffect(() => {
@@ -129,6 +117,7 @@ export function ChatPane({
         | { delta?: string; name?: string; status?: string; intent?: string; mode?: string; error?: string }
         | undefined;
       if (payload.channel === "workflow:stream_delta" && typeof inner?.delta === "string") {
+        appendPreview(sessionId, inner.delta);
         setStreamPreview((s) => s + inner.delta);
         return;
       }
