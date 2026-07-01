@@ -87,12 +87,12 @@ func TestMCP_CRUDPingStatsDisable(t *testing.T) {
 
 	// ── 1. Create ─────────────────────────────────────────────────────────────
 	srv, err := mem.CreateMCPServer("test-user", store.MCPServerInput{
-		Name:      "store-test-" + time.Now().Format("150405"),
-		BaseURL:   fakeSrv.URL,
-		AuthType:  "bearer",
+		Name:       "store-test-" + time.Now().Format("150405"),
+		BaseURL:    fakeSrv.URL,
+		AuthType:   "bearer",
 		AuthHeader: "Authorization",
-		AuthValue: "secret-token",
-		Enabled:   true,
+		AuthValue:  "secret-token",
+		Enabled:    store.BoolPtr(true),
 	})
 	if err != nil {
 		t.Fatalf("CreateMCPServer: %v", err)
@@ -186,6 +186,7 @@ func TestMCP_CRUDPingStatsDisable(t *testing.T) {
 		Name:    srv.Name + "-upd",
 		BaseURL: srv.BaseURL,
 		// AuthValue intentionally empty → should preserve "secret-token"
+		// Enabled and InsecureSkipVerify are nil → must NOT be overwritten
 	})
 	if err != nil {
 		t.Fatalf("UpdateMCPServer: %v", err)
@@ -197,5 +198,93 @@ func TestMCP_CRUDPingStatsDisable(t *testing.T) {
 	after, _ := mem.GetMCPServer(srv.ID)
 	if after.AuthValue != "secret-token" {
 		t.Errorf("UpdateMCPServer: auth_value not preserved; got %q", after.AuthValue)
+	}
+}
+
+// TestMCP_UpdatePreservesFlags asserts that a name-only update (nil Enabled,
+// nil InsecureSkipVerify) does not flip either flag to false.
+func TestMCP_UpdatePreservesFlags(t *testing.T) {
+	pool := newTestPool(t)
+	mem := store.NewMemory(pool)
+
+	fakeSrv := httptest.NewServer(fakeMCPHandler(t))
+	defer fakeSrv.Close()
+
+	// Create server with enabled=true (default via nil — let default apply).
+	srv, err := mem.CreateMCPServer("test-user", store.MCPServerInput{
+		Name:    "flags-test-" + time.Now().Format("150405.000"),
+		BaseURL: fakeSrv.URL,
+	})
+	if err != nil {
+		t.Fatalf("CreateMCPServer: %v", err)
+	}
+	t.Cleanup(func() { _ = mem.DeleteMCPServer(srv.ID) })
+
+	// Confirm defaults: enabled=true, insecure=false.
+	got, err := mem.GetMCPServer(srv.ID)
+	if err != nil {
+		t.Fatalf("GetMCPServer: %v", err)
+	}
+	if !got.Enabled {
+		t.Fatal("CreateMCPServer: expected Enabled=true by default")
+	}
+
+	// Name-only update — booleans are nil pointers (not provided).
+	_, err = mem.UpdateMCPServer(srv.ID, store.MCPServerInput{
+		Name: srv.Name + "-renamed",
+	})
+	if err != nil {
+		t.Fatalf("UpdateMCPServer (name-only): %v", err)
+	}
+
+	// Enabled must still be true after the rename.
+	after, err := mem.GetMCPServer(srv.ID)
+	if err != nil {
+		t.Fatalf("GetMCPServer after update: %v", err)
+	}
+	if !after.Enabled {
+		t.Error("UpdateMCPServer: name-only update silently disabled the server (pointer bool fix failed)")
+	}
+	if after.InsecureSkipVerify {
+		t.Error("UpdateMCPServer: name-only update unexpectedly set InsecureSkipVerify=true")
+	}
+}
+
+// TestMCP_HealthLoopNoDeadlock guards against the semaphore-drain deadlock
+// when fewer than cap(sem)=4 servers are enabled. It runs one health-loop
+// tick via a short-lived context (1 s) and asserts RunMCPHealthLoop returns.
+func TestMCP_HealthLoopNoDeadlock(t *testing.T) {
+	pool := newTestPool(t)
+	mem := store.NewMemory(pool)
+
+	fakeSrv := httptest.NewServer(fakeMCPHandler(t))
+	defer fakeSrv.Close()
+
+	// Create exactly 1 enabled server — well under the sem cap of 4.
+	srv, err := mem.CreateMCPServer("test-user", store.MCPServerInput{
+		Name:    "health-loop-test-" + time.Now().Format("150405.000"),
+		BaseURL: fakeSrv.URL,
+		Enabled: store.BoolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("CreateMCPServer: %v", err)
+	}
+	t.Cleanup(func() { _ = mem.DeleteMCPServer(srv.ID) })
+
+	// Cancel context after 1 s — the loop must return well before 5 s.
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		mem.RunMCPHealthLoop(ctx, 200*time.Millisecond)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good — loop exited when context was cancelled.
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunMCPHealthLoop did not return within 5 s (semaphore deadlock?)")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nk/platform/api/internal/mcp"
@@ -43,15 +44,21 @@ type MCPServer struct {
 
 // MCPServerInput is used for create and update operations.
 // AuthValue is optional on update — empty means "preserve existing".
+// Enabled and InsecureSkipVerify are pointers so that nil means "not
+// provided" (preserve current value on update) while an explicit false is
+// honoured. Use BoolPtr to construct values.
 type MCPServerInput struct {
 	Name               string `json:"name"`
 	BaseURL            string `json:"baseUrl"`
 	AuthType           string `json:"authType"`
 	AuthHeader         string `json:"authHeader"`
 	AuthValue          string `json:"authValue"` // empty = preserve on update
-	InsecureSkipVerify bool   `json:"insecureSkipVerify"`
-	Enabled            bool   `json:"enabled"`
+	InsecureSkipVerify *bool  `json:"insecureSkipVerify"`
+	Enabled            *bool  `json:"enabled"`
 }
+
+// BoolPtr is a convenience helper for constructing MCPServerInput literals.
+func BoolPtr(b bool) *bool { return &b }
 
 // MCPToolEntry is one row in the global tool catalog view.
 type MCPToolEntry struct {
@@ -148,6 +155,15 @@ func (m *Memory) CreateMCPServer(createdBy string, in MCPServerInput) (*MCPServe
 	if in.AuthType == "" {
 		in.AuthType = "none"
 	}
+	// Default booleans for create: enabled=true, insecure=false.
+	enabled := true
+	if in.Enabled != nil {
+		enabled = *in.Enabled
+	}
+	insecure := false
+	if in.InsecureSkipVerify != nil {
+		insecure = *in.InsecureSkipVerify
+	}
 	var sv MCPServer
 	var pingAt *string
 	err = m.pool.QueryRow(context.Background(), `
@@ -160,7 +176,7 @@ func (m *Memory) CreateMCPServer(createdBy string, in MCPServerInput) (*MCPServe
 		          server_name, server_version, created_by,
 		          created_at, updated_at`,
 		in.Name, in.BaseURL, in.AuthType, in.AuthHeader, encAuth,
-		in.InsecureSkipVerify, in.Enabled, createdBy,
+		insecure, enabled, createdBy,
 	).Scan(
 		&sv.ID, &sv.Name, &sv.BaseURL, &sv.AuthType, &sv.AuthHeader, &sv.AuthValue,
 		&sv.InsecureSkipVerify, &sv.Enabled,
@@ -213,8 +229,12 @@ func (m *Memory) UpdateMCPServer(id string, in MCPServerInput) (*MCPServer, erro
 		}
 		put("auth_value", encAuth)
 	}
-	put("insecure_skip_verify", in.InsecureSkipVerify)
-	put("enabled", in.Enabled)
+	if in.InsecureSkipVerify != nil {
+		put("insecure_skip_verify", *in.InsecureSkipVerify)
+	}
+	if in.Enabled != nil {
+		put("enabled", *in.Enabled)
+	}
 	sets = append(sets, "updated_at = NOW()")
 	args = append(args, id)
 
@@ -551,22 +571,25 @@ func (m *Memory) pingAllEnabledMCP(ctx context.Context) {
 		ids = append(ids, id)
 	}
 	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
 	for _, id := range ids {
-		sem <- struct{}{}
+		wg.Add(1)
+		sem <- struct{}{} // acquire concurrency slot before spawning
 		go func(id string) {
 			defer func() {
 				if r := recover(); r != nil {
 					log.Printf("mcp health loop panic for %s: %v", id, r)
 				}
-				<-sem
+				<-sem // release slot
+				wg.Done()
 			}()
+			if ctx.Err() != nil {
+				return
+			}
 			if _, err := m.PingMCPServer(id); err != nil {
 				log.Printf("mcp health ping %s: %v", id, err)
 			}
 		}(id)
 	}
-	// drain semaphore to wait for in-flight pings
-	for i := 0; i < cap(sem); i++ {
-		sem <- struct{}{}
-	}
+	wg.Wait()
 }
