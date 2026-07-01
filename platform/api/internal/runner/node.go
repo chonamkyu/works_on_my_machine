@@ -607,6 +607,11 @@ func (r *NodeRunner) ensureSDKSymlink(dir string) error {
 // publishLog emits a single synthetic log line on behalf of the runner
 // (e.g. "installing dependencies …"). The supervised child process uses pipe.
 func (r *NodeRunner) publishLog(task *store.Task, run *store.Run, stream, text string) {
+	// Dry-runs (RunDry) have no run row — skip the run-scoped log publish
+	// rather than nil-deref and crash the whole control plane.
+	if run == nil {
+		return
+	}
 	line := store.LogLine{RunID: run.ID, Ts: time.Now(), Stream: stream, Text: text}
 	r.store.AppendLog(line)
 	r.bus.Publish(store.Event{
