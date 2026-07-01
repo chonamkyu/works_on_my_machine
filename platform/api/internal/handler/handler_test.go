@@ -569,3 +569,107 @@ func TestSetProxySession(t *testing.T) {
 		t.Error("SetProxySession: no platform_proxy cookie in response")
 	}
 }
+
+// buildAcceptRouter returns a chi router wired with the admin-accept skill-proposal route.
+func buildAcceptRouter(h *handler.Handler, authMW *auth.Middleware, s *store.Memory) chi.Router {
+	r := chi.NewRouter()
+	r.Use(authMW.Authenticate)
+	r.Use(h.UpsertUserMiddleware)
+	r.Use(func(next http.Handler) http.Handler { return authMW.Workspace(s)(next) })
+	r.Post("/v1/skill-proposals/{id}/accept", h.AcceptSkillProposal)
+	return r
+}
+
+// TestAcceptSkillProposalPublishesIntoRegistry verifies the core B-task-4 behaviour:
+//  1. Accepting a proposal for a new skill "evo1" creates it in the registry (v1).
+//  2. Accepting a second proposal for the same skill publishes a new version (v2).
+func TestAcceptSkillProposalPublishesIntoRegistry(t *testing.T) {
+	s := openTestDB(t)
+	auth.SetAdminEnv("")
+	auth.SetAdminChecker(s)
+
+	authMW := auth.New(true) // dev mode → platform-admin claims auto-injected
+	h := handler.New(s, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	r := buildAcceptRouter(h, authMW, s)
+
+	// Clean up the "evo1" skill and any proposals after the test.
+	t.Cleanup(func() {
+		_ = s.DeleteSkill("evo1", "test-cleanup")
+		for _, p := range s.ListSkillProposals(store.GlobalScope, "") {
+			if p.SkillName == "evo1" {
+				_, _ = s.ResolveSkillProposal(p.ID, "rejected")
+			}
+		}
+	})
+
+	// --- Proposal 1: skill "evo1" does not exist yet → CreateSkill ---
+	p1, err := s.CreateSkillProposal(&store.SkillProposal{
+		WorkspaceID: store.GlobalScope,
+		SkillName:   "evo1",
+		SkillBody:   "# evo1\nDo the first thing.",
+		Rationale:   "first rationale",
+		AppliesWhen: "always",
+	})
+	if err != nil {
+		t.Fatalf("CreateSkillProposal p1: %v", err)
+	}
+
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/skill-proposals/"+p1.ID+"/accept", nil)
+	rr1 := httptest.NewRecorder()
+	r.ServeHTTP(rr1, req1)
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("accept p1: want 200, got %d body=%s", rr1.Code, rr1.Body.String())
+	}
+
+	// GetSkill must now exist with a matching version body.
+	sk, err := s.GetSkill("evo1")
+	if err != nil {
+		t.Fatalf("GetSkill after accept p1: %v", err)
+	}
+	if sk.Name != "evo1" {
+		t.Errorf("skill name: want evo1, got %q", sk.Name)
+	}
+	versions, err := s.ListSkillVersions("evo1")
+	if err != nil {
+		t.Fatalf("ListSkillVersions after accept p1: %v", err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("versions after p1 accept: want 1, got %d", len(versions))
+	}
+	if !strings.Contains(versions[0].Body, "Do the first thing.") {
+		t.Errorf("v1 body mismatch: got %q", versions[0].Body)
+	}
+	t.Logf("accept p1 → registry v1 body=%q: PASS", versions[0].Body)
+
+	// --- Proposal 2: skill already exists → PublishSkillVersion (v2) ---
+	p2, err := s.CreateSkillProposal(&store.SkillProposal{
+		WorkspaceID: store.GlobalScope,
+		SkillName:   "evo1",
+		SkillBody:   "# evo1\nDo the second thing.",
+		Rationale:   "second rationale",
+		AppliesWhen: "always",
+	})
+	if err != nil {
+		t.Fatalf("CreateSkillProposal p2: %v", err)
+	}
+
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/skill-proposals/"+p2.ID+"/accept", nil)
+	rr2 := httptest.NewRecorder()
+	r.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("accept p2: want 200, got %d body=%s", rr2.Code, rr2.Body.String())
+	}
+
+	versions2, err := s.ListSkillVersions("evo1")
+	if err != nil {
+		t.Fatalf("ListSkillVersions after accept p2: %v", err)
+	}
+	if len(versions2) != 2 {
+		t.Fatalf("versions after p2 accept: want 2, got %d", len(versions2))
+	}
+	// ListSkillVersions returns DESC; versions2[0] is the latest (v2).
+	if !strings.Contains(versions2[0].Body, "Do the second thing.") {
+		t.Errorf("v2 body mismatch: got %q", versions2[0].Body)
+	}
+	t.Logf("accept p2 → registry v2 body=%q (total versions=%d): PASS", versions2[0].Body, len(versions2))
+}

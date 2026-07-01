@@ -522,22 +522,45 @@ func (h *Handler) AcceptSkillProposal(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 		return
 	}
-	// Write the file to the global skills dir — proposals are global scope,
-	// so we must not write to an attacker-controlled per-user path.
-	dir := perUserSkillsDir(store.GlobalScope)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+
+	actor := auth.MustUserID(r.Context())
+	// Use Rationale as the version description when available.
+	desc := p.Rationale
+	comment := "accepted skill proposal " + id
+
+	// Publish into the global skills registry. Create the skill if it does not
+	// exist yet; otherwise append a new immutable version.
+	sk, lookupErr := h.Store.GetSkill(p.SkillName)
+	if sk == nil || lookupErr != nil {
+		// Skill does not exist — create it (version 1 + @latest alias).
+		if _, _, err := h.Store.CreateSkill(actor, p.SkillName, desc, nil, p.SkillBody, comment); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "registry create: " + err.Error()})
+			return
+		}
+	} else {
+		// Skill already exists — publish an immutable new version.
+		if _, err := h.Store.PublishSkillVersion(p.SkillName, actor, desc, nil, p.SkillBody, comment); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "registry publish: " + err.Error()})
+			return
+		}
+	}
+
+	// Mark the proposal accepted only after a successful registry publish.
+	resolved, err := h.Store.ResolveSkillProposal(id, "accepted")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "resolve proposal: " + err.Error()})
 		return
 	}
-	content := p.SkillBody
-	if p.AppliesWhen != "" && p.AppliesWhen != "always" {
-		content = "---\nactivate_when: " + p.AppliesWhen + "\n---\n\n" + content
-	}
-	if err := os.WriteFile(filepath.Join(dir, p.SkillName+".md"), []byte(content), 0o644); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	resolved, _ := h.Store.ResolveSkillProposal(id, "accepted")
+
+	_ = h.Store.RecordAudit(store.AuditEntry{
+		ActorSub:     actor,
+		Action:       "skill.publish",
+		ResourceType: "skill",
+		ResourceName: p.SkillName,
+		WorkspaceID:  store.GlobalScope,
+		Details:      map[string]any{"proposalID": id},
+	})
+
 	writeJSON(w, http.StatusOK, resolved)
 }
 
