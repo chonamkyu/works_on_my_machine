@@ -364,6 +364,24 @@ func main() {
 			r.Get("/users/{id}/activity", h.ActivityStream)
 		})
 
+		// Global skill repository — reads open to any authenticated caller;
+		// writes gated by AdminOnly.
+		// NOTE: /resolve must be registered before /{name} so chi routes the
+		// literal path correctly (chi prefers static segments over URL params
+		// at the same position, so this ordering is correct; the explicit
+		// registration below makes the intent explicit regardless).
+		r.Get("/skill-repo", h.ListGlobalSkills)
+		r.Get("/skill-repo/resolve", h.ResolveGlobalSkill)
+		r.Get("/skill-repo/{name}", h.GetGlobalSkill)
+		r.Get("/skill-repo/{name}/versions/{n}", h.GetGlobalSkillVersion)
+		r.Group(func(r chi.Router) {
+			r.Use(authMW.AdminOnly)
+			r.Post("/skill-repo", h.CreateGlobalSkill)
+			r.Post("/skill-repo/{name}/versions", h.PublishGlobalSkillVersion)
+			r.Post("/skill-repo/{name}/aliases", h.MoveGlobalSkillAlias)
+			r.Delete("/skill-repo/{name}", h.DeleteGlobalSkill)
+		})
+
 		// Admin sub-group (guarded by AdminOnly middleware)
 		r.Group(func(r chi.Router) {
 			r.Use(authMW.AdminOnly)
