@@ -247,7 +247,12 @@ func (m *Memory) UpdateMCPServer(id string, in MCPServerInput) (*MCPServer, erro
 	if tag.RowsAffected() == 0 {
 		return nil, ErrNotFound
 	}
-	return m.GetMCPServer(id)
+	sv, err := m.GetMCPServer(id)
+	if err != nil {
+		return nil, err
+	}
+	sv.AuthValue = "" // mask on return — consistent with CreateMCPServer/ListMCPServers
+	return sv, nil
 }
 
 // DeleteMCPServer removes the server row and cascades to tool_calls and

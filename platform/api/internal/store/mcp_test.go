@@ -194,10 +194,55 @@ func TestMCP_CRUDPingStatsDisable(t *testing.T) {
 	if updated.Name != srv.Name+"-upd" {
 		t.Errorf("UpdateMCPServer: name not updated, got %q", updated.Name)
 	}
-	// Fetch fresh and confirm auth preserved.
+	// UpdateMCPServer must return masked (empty) AuthValue.
+	if updated.AuthValue != "" {
+		t.Errorf("UpdateMCPServer: AuthValue must be masked, got %q", updated.AuthValue)
+	}
+	// Fetch fresh and confirm auth preserved in DB.
 	after, _ := mem.GetMCPServer(srv.ID)
 	if after.AuthValue != "secret-token" {
 		t.Errorf("UpdateMCPServer: auth_value not preserved; got %q", after.AuthValue)
+	}
+}
+
+// TestMCP_UpdateMasksAuthValue asserts that UpdateMCPServer returns an empty
+// AuthValue even when an auth secret is stored, consistent with Create/List.
+func TestMCP_UpdateMasksAuthValue(t *testing.T) {
+	pool := newTestPool(t)
+	mem := store.NewMemory(pool)
+
+	fakeSrv := httptest.NewServer(fakeMCPHandler(t))
+	defer fakeSrv.Close()
+
+	srv, err := mem.CreateMCPServer("test-user", store.MCPServerInput{
+		Name:      "auth-mask-test-" + time.Now().Format("150405.000"),
+		BaseURL:   fakeSrv.URL,
+		AuthType:  "bearer",
+		AuthValue: "super-secret",
+	})
+	if err != nil {
+		t.Fatalf("CreateMCPServer: %v", err)
+	}
+	t.Cleanup(func() { _ = mem.DeleteMCPServer(srv.ID) })
+
+	// Update name only; AuthValue empty → preserved in DB.
+	updated, err := mem.UpdateMCPServer(srv.ID, store.MCPServerInput{
+		Name: srv.Name + "-v2",
+	})
+	if err != nil {
+		t.Fatalf("UpdateMCPServer: %v", err)
+	}
+	if updated.AuthValue != "" {
+		t.Errorf("UpdateMCPServer: AuthValue must be masked (empty), got %q", updated.AuthValue)
+	}
+
+	// GetMCPServer must still decrypt and return the real secret.
+	got, err := mem.GetMCPServer(srv.ID)
+	if err != nil {
+		t.Fatalf("GetMCPServer: %v", err)
+	}
+	if got.AuthValue != "super-secret" {
+		t.Errorf("GetMCPServer: expected decrypted AuthValue=%q, got %q", "super-secret", got.AuthValue)
 	}
 }
 

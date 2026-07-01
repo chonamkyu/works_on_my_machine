@@ -201,6 +201,17 @@ func (h *Handler) SetMCPToolDisabled(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Verify the server exists before touching the tool-disabled table; the
+	// INSERT/DELETE in SetMCPToolDisabled succeeds silently for unknown IDs.
+	if _, err := h.Store.GetMCPServer(id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
 	if err := h.Store.SetMCPToolDisabled(id, tool, auth.MustUserID(r.Context()), body.Reason, body.Disabled); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
