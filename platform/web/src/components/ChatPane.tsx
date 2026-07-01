@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Sparkles, KeyRound, ChevronsRight } from "lucide-react";
 import { api, subscribe, type SSEMessage } from "../lib/api";
+import { useGeneration, setGenerating, clearGeneration, getGeneration } from "../lib/generation";
 
 const USER_ID = "u_local";
 
@@ -41,12 +42,22 @@ export function ChatPane({
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
-  const [pending, setPending] = useState(false);
-  const [streamPreview, setStreamPreview] = useState("");
+  const [pending, setPending] = useState<boolean>(() => getGeneration(sessionId)?.generating ?? false);
+  const [streamPreview, setStreamPreview] = useState<string>(() => getGeneration(sessionId)?.preview ?? "");
   const [progressSteps, setProgressSteps] = useState<string[]>([]);
-  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [startedAt, setStartedAt] = useState<number | null>(() => getGeneration(sessionId)?.startedAt ?? null);
   const [now, setNow] = useState<number>(() => Date.now());
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  const genEntry = useGeneration(sessionId);
+  // Sync accumulated stream preview from the global store into local state.
+  // The App-level SSE accumulator writes deltas even when ChatPane is unmounted,
+  // so on remount pending may be true with accumulated preview in the store.
+  useEffect(() => {
+    if (pending && genEntry?.preview !== undefined && genEntry.preview.length > streamPreview.length) {
+      setStreamPreview(genEntry.preview);
+    }
+  }, [genEntry?.preview, pending]);
 
   // Tick a clock while a turn is in flight so the user can see elapsed time.
   useEffect(() => {
@@ -141,6 +152,7 @@ export function ChatPane({
     setStartedAt(Date.now());
     setNow(Date.now());
     setPending(true);
+    setGenerating(sessionId, Date.now());
     try {
       const reply = await api.chat(sessionId, content);
       setMessages((m) => [
@@ -163,6 +175,7 @@ export function ChatPane({
         { role: "agent", content: `Error: ${(err as Error).message}` },
       ]);
     } finally {
+      clearGeneration(sessionId);
       setPending(false);
       setStreamPreview("");
       setProgressSteps([]);
