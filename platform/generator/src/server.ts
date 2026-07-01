@@ -51,15 +51,30 @@ function loadSkillsFrom(dir: string, activeTags: Set<string>): string {
 }
 
 // Hot-reloaded per request so accepted evolution PRs apply immediately.
-function loadSystemPrompt(userId: string | undefined, activeTags: Set<string>): string {
+// globalSkills: resolved @latest registry skill bodies passed from the Go
+// control plane. They are injected after baseSkills as the evolved overlay
+// layer (before per-user file overlays). Empty array → no-op.
+function loadSystemPrompt(
+  userId: string | undefined,
+  activeTags: Set<string>,
+  globalSkills: Array<{ name: string; raw: string }> = [],
+): string {
   const base = readFileSync(join(promptsDir, "system.md"), "utf-8");
   const baseSkills = loadSkillsFrom(join(promptsDir, "skills"), activeTags);
+  // Global registry skills: evolved overlay resolved at @latest by the control
+  // plane. Include all — global skills are always-on by design; activeTags
+  // filtering is a file-overlay concern only.
+  const registrySkillsSection = globalSkills.length > 0
+    ? globalSkills
+        .map((s) => `# Skill: ${s.name}\n\n${s.raw}`)
+        .join("\n\n---\n\n")
+    : "";
   // Per-user skill overlay: prompts/users/<userId>/skills/*.md
   let userSkills = "";
   if (userId) {
     userSkills = loadSkillsFrom(join(promptsDir, "users", userId, "skills"), activeTags);
   }
-  return [base, baseSkills, userSkills].filter(Boolean).join("\n\n---\n\n");
+  return [base, baseSkills, registrySkillsSection, userSkills].filter(Boolean).join("\n\n---\n\n");
 }
 
 const app = Fastify({ logger: false });
@@ -101,6 +116,9 @@ interface GenerateBody {
   userContext?: { topic: string; content: string; pinned?: boolean }[];
   // Phase 2 self-tuning
   userProfile?: Record<string, unknown>;
+  // Global registry skills resolved at @latest by the Go control plane.
+  // Inlined into the system prompt as the evolved overlay layer.
+  globalSkills?: { name: string; raw: string }[];
 }
 
 // SYSTEM is now built per-request inside /generate so that prompt/skill
@@ -156,6 +174,7 @@ app.post<{ Body: GenerateBody }>("/generate", async (req, reply) => {
     userContext,
     userProfile,
     userId,
+    globalSkills,
   } = req.body ?? { prompt: "" };
 
   // Compute active tags so skill files marked `activate_when: tag:<x>` opt in.
@@ -165,7 +184,7 @@ app.post<{ Body: GenerateBody }>("/generate", async (req, reply) => {
   for (const t of existingTasks ?? []) {
     if (t.kind === "service") activeTags.add("dashboard");
   }
-  const SYSTEM = loadSystemPrompt(userId, activeTags);
+  const SYSTEM = loadSystemPrompt(userId, activeTags, globalSkills ?? []);
 
   reply.raw.writeHead(200, {
     "Content-Type": "text/event-stream",

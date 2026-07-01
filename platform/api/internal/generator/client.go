@@ -74,6 +74,16 @@ type VerificationSnapshot struct {
 	DurationMs    int      `json:"durationMs,omitempty"`
 }
 
+// GeneratorSkill carries the name and full raw content of a global registry
+// skill resolved at @latest. The TS generator inlines these into the system
+// prompt as an evolved overlay layer on top of the base skills files.
+type GeneratorSkill struct {
+	Name string `json:"name"`
+	// Raw is the full SKILL.md content including frontmatter so the TS side
+	// can parse activate_when if desired.
+	Raw string `json:"raw"`
+}
+
 type Request struct {
 	Prompt              string           `json:"prompt"`
 	SessionID           string           `json:"sessionId,omitempty"`
@@ -89,6 +99,11 @@ type Request struct {
 	// Phase 2 self-tuning: stable user profile fields (preferred language,
 	// reply tone, expertise, hard rules) the agent should always honor.
 	UserProfile map[string]any `json:"userProfile,omitempty"`
+	// GlobalSkills carries the @latest body of every skill in the global
+	// registry. The TS generator inlines them into the system prompt as the
+	// evolved overlay layer (after base skills, before per-user skills).
+	// Empty when the registry is empty — backward-compatible no-op.
+	GlobalSkills []GeneratorSkill `json:"globalSkills,omitempty"`
 }
 
 type MemoryHint struct {

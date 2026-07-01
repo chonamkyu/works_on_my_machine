@@ -615,6 +615,33 @@ func perUserSkillsDir(userID string) string {
 	return filepath.Join(root, "users", userID, "skills")
 }
 
+// AssembleGlobalSkills resolves every skill in the global registry to its
+// @latest version and returns the name+raw pairs for the generator. Skills
+// that fail to resolve are silently skipped so a bad registry entry never
+// blocks a chat turn.
+func (h *Handler) AssembleGlobalSkills(ctx context.Context) []generator.GeneratorSkill {
+	if h.Store == nil {
+		return nil
+	}
+	skills, err := h.Store.ListSkills(ctx)
+	if err != nil || len(skills) == 0 {
+		return nil
+	}
+	out := make([]generator.GeneratorSkill, 0, len(skills))
+	for _, sk := range skills {
+		ref, err := store.ParseSkillRef(sk.Name) // resolves to name@latest
+		if err != nil {
+			continue
+		}
+		ver, err := h.Store.ResolveSkill(ref)
+		if err != nil || ver == nil {
+			continue
+		}
+		out = append(out, generator.GeneratorSkill{Name: sk.Name, Raw: ver.Raw})
+	}
+	return out
+}
+
 func loadOverlaySkills(userID string) []reflection.ExistingSkill {
 	dir := perUserSkillsDir(userID)
 	entries, err := os.ReadDir(dir)
@@ -1611,6 +1638,8 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 	// reply tone, hard rules, etc.) and pass verbatim.
 	userProfile := h.loadUserProfileMap(wsID)
 
+	globalSkills := h.AssembleGlobalSkills(ctx)
+
 	outcome, err := h.Generator.Generate(ctx, generator.Request{
 		Prompt:              body.Content,
 		SessionID:           sessionID,
@@ -1622,6 +1651,7 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 		ExistingTasks:       existing,
 		UserContext:         memHints,
 		UserProfile:         userProfile,
+		GlobalSkills:        globalSkills,
 	}, func(channel string, payload json.RawMessage) {
 		var data any
 		_ = json.Unmarshal(payload, &data)
