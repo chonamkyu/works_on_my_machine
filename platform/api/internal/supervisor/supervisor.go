@@ -96,7 +96,7 @@ func NewClient(kind string, deps Deps) (Client, error) {
 	case "process":
 		return newProcess(deps), nil
 	case "container":
-		return nil, fmt.Errorf("supervisor: runtime %q not implemented yet", kind)
+		return newContainer(deps)
 	case "k8s":
 		return nil, fmt.Errorf("supervisor: runtime %q not implemented yet", kind)
 	default:
