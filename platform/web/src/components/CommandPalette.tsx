@@ -25,7 +25,7 @@ interface Props {
   tasks: Task[];
   onSelectTask: (id: string) => void;
   onNewTask: () => Promise<void>;
-  onOpenView: (view: "memory" | "evolution" | "discover" | "settings" | "skills") => void;
+  onOpenView: (view: "memory" | "evolution" | "discover" | "settings" | "skills" | "mcp") => void;
 }
 
 export function CommandPalette({ open, onClose, tasks, onSelectTask, onNewTask, onOpenView }: Props) {
@@ -58,6 +58,7 @@ export function CommandPalette({ open, onClose, tasks, onSelectTask, onNewTask, 
       { id: "nav:evolution", label: "Evolution PRs", group: "navigate", onSelect: () => { onOpenView("evolution"); onClose(); } },
       { id: "nav:discover", label: "Discover tasks", group: "navigate", onSelect: () => { onOpenView("discover"); onClose(); } },
       { id: "nav:skills", label: "Skills registry", group: "navigate", onSelect: () => { onOpenView("skills"); onClose(); } },
+      { id: "nav:mcp", label: "MCP servers", group: "navigate", onSelect: () => { onOpenView("mcp"); onClose(); } },
       { id: "nav:settings", label: "Settings", hint: "⌘,", group: "navigate", onSelect: () => { onOpenView("settings"); onClose(); } },
     ];
     const direct: Action[] = [

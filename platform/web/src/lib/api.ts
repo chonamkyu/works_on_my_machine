@@ -197,6 +197,50 @@ export interface Me {
   isAdmin: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// MCP Server Registry
+// ---------------------------------------------------------------------------
+
+export interface McpServer {
+  id: string;
+  name: string;
+  baseUrl: string;
+  authType: string;
+  authHeader: string;
+  /** authValue is always masked/empty on read — write-only */
+  authValue?: string;
+  enabled: boolean;
+  insecureSkipVerify: boolean;
+  lastStatus: string;
+  lastError: string;
+  toolCount: number;
+  serverName: string;
+  serverVersion: string;
+  lastPingAt: string;
+}
+
+export interface McpToolEntry {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  disabled: boolean;
+  disabledReason: string;
+}
+
+export interface McpDailyCount {
+  date: string;
+  count: number;
+}
+
+export interface McpPingResult {
+  ok: boolean;
+  latencyMs: number;
+  error?: string;
+  serverName?: string;
+  serverVersion?: string;
+  toolCount?: number;
+}
+
 export const api = {
   listTasks: () => http<{ tasks: Task[] }>("/v1/tasks"),
   createTask: (b: { name: string; description?: string; triggers?: Trigger[]; capabilities?: string[] }) =>
@@ -328,6 +372,37 @@ export const api = {
     }),
   deleteSkill: (name: string) =>
     http<void>(`/v1/skill-repo/${encodeURIComponent(name)}`, { method: "DELETE" }),
+
+  // --- MCP Server Registry (reads open; writes admin-only) ---
+  listMcpServers: () => http<{ servers: McpServer[] | null }>("/v1/mcp"),
+  listMcpToolCatalog: () => http<{ tools: McpToolEntry[] | null }>("/v1/mcp/tools"),
+  getMcpServerTools: (id: string) =>
+    http<{ tools: McpToolEntry[] | null }>(`/v1/mcp/${encodeURIComponent(id)}/tools`),
+  getMcpServerStats: (id: string, days = 14) =>
+    http<{ stats: McpDailyCount[] | null }>(`/v1/mcp/${encodeURIComponent(id)}/stats?days=${days}`),
+  pingMcpServer: (id: string) =>
+    http<McpPingResult>(`/v1/mcp/${encodeURIComponent(id)}/ping`, { method: "POST" }),
+  callMcpTool: (id: string, tool: string, args: Record<string, unknown>) =>
+    http<unknown>(`/v1/mcp/${encodeURIComponent(id)}/call`, {
+      method: "POST",
+      body: JSON.stringify({ tool, arguments: args }),
+    }),
+
+  // Admin writes
+  createMcpServer: (body: Omit<McpServer, "id" | "lastStatus" | "lastError" | "toolCount" | "serverName" | "serverVersion" | "lastPingAt"> & { authValue?: string }) =>
+    http<McpServer>("/v1/mcp", { method: "POST", body: JSON.stringify(body) }),
+  updateMcpServer: (id: string, body: Partial<Omit<McpServer, "id" | "lastStatus" | "lastError" | "toolCount" | "serverName" | "serverVersion" | "lastPingAt">> & { authValue?: string }) =>
+    http<McpServer>(`/v1/mcp/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  deleteMcpServer: (id: string) =>
+    http<void>(`/v1/mcp/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  setMcpToolDisabled: (id: string, tool: string, disabled: boolean, reason: string) =>
+    http<void>(`/v1/mcp/${encodeURIComponent(id)}/tools/${encodeURIComponent(tool)}/disabled`, {
+      method: "POST",
+      body: JSON.stringify({ disabled, reason }),
+    }),
 };
 
 export interface Workspace {
