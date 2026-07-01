@@ -45,6 +45,11 @@ func main() {
 	auth.SetAdminChecker(taskStore)
 	if secret := firstNonEmpty(os.Getenv("PLATFORM_PROXY_SECRET"), os.Getenv("PLATFORM_ENCRYPTION_KEY")); secret != "" {
 		auth.SetProxySecret(secret)
+	} else {
+		// Fail-closed: without a signing secret the proxy/iframe cookie auth
+		// cannot mint or verify tokens. The server still runs; the proxy just
+		// refuses to issue sessions until a secret is configured.
+		log.Printf("WARNING: proxy/iframe auth is DISABLED — set PLATFORM_PROXY_SECRET or PLATFORM_ENCRYPTION_KEY to enable proxy-session cookies")
 	}
 
 	bus := store.NewBus()
@@ -94,6 +99,9 @@ func main() {
 	h.Node = nodeRunner
 	h.Verify = verify.New(envOr("PLATFORM_VERIFY_URL", "http://localhost:8083"))
 	h.Reflection = reflectClient
+	// Read the proxy-cookie Secure attribute once at startup rather than
+	// per-request in SetProxySession.
+	h.ProxyCookieSecure = strings.HasPrefix(os.Getenv("PLATFORM_PUBLIC_URL"), "https")
 
 	// Anything still marked "running" or "queued" at boot survived a process
 	// restart — it can't still be in flight, so cancel it. Cleans up the
@@ -247,7 +255,7 @@ func main() {
 	r.Use(middleware.Timeout(120 * time.Second))
 
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:5173"},
+		AllowedOrigins:   corsOrigins(),
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Workspace-ID"},
 		AllowCredentials: true,
@@ -424,4 +432,24 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// corsOrigins returns the allowed CORS origins, read from the comma-separated
+// PLATFORM_CORS_ORIGINS env var. When unset it defaults to the local Vite dev
+// origin. Entries are trimmed and empties dropped.
+func corsOrigins() []string {
+	raw := os.Getenv("PLATFORM_CORS_ORIGINS")
+	if raw == "" {
+		return []string{"http://localhost:5173"}
+	}
+	var origins []string
+	for _, o := range strings.Split(raw, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			origins = append(origins, o)
+		}
+	}
+	if len(origins) == 0 {
+		return []string{"http://localhost:5173"}
+	}
+	return origins
 }

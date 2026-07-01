@@ -31,6 +31,12 @@ func SetProxySecret(raw string) {
 	proxySecretMu.Unlock()
 }
 
+// proxySecret returns the configured HMAC signing key, or nil if none has been
+// set (via SetProxySecret) and neither PLATFORM_PROXY_SECRET nor
+// PLATFORM_ENCRYPTION_KEY is present in the environment. Callers MUST treat a
+// nil return as fail-closed: mint nothing and verify nothing. There is
+// deliberately NO hardcoded fallback key — a publicly-known default would let
+// anyone forge proxy-session cookies and bypass auth.
 func proxySecret() []byte {
 	proxySecretMu.RLock()
 	if len(proxySecretRaw) > 0 {
@@ -54,8 +60,8 @@ func proxySecret() []byte {
 		}
 		return []byte(v)
 	}
-	// Last resort: a deterministic but obviously-weak dev key.
-	return []byte("platform-proxy-dev-secret-32bytes")
+	// No secret configured: fail closed.
+	return nil
 }
 
 type proxyPayload struct {
@@ -66,6 +72,11 @@ type proxyPayload struct {
 // MintProxyToken creates a signed compact token for sub, valid for ttl.
 // Format: base64url(JSON).base64url(HMAC-SHA256).
 func MintProxyToken(sub string, ttl time.Duration) (string, error) {
+	secret := proxySecret()
+	if len(secret) == 0 {
+		// Fail closed: no signing secret configured, so we cannot mint a token.
+		return "", nil
+	}
 	p := proxyPayload{Sub: sub, Exp: time.Now().Add(ttl).Unix()}
 	payloadJSON, err := json.Marshal(p)
 	if err != nil {
@@ -73,7 +84,7 @@ func MintProxyToken(sub string, ttl time.Duration) (string, error) {
 	}
 	b64payload := base64.RawURLEncoding.EncodeToString(payloadJSON)
 
-	mac := hmac.New(sha256.New, proxySecret())
+	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(b64payload))
 	sig := mac.Sum(nil)
 	b64sig := base64.RawURLEncoding.EncodeToString(sig)
@@ -85,6 +96,11 @@ func MintProxyToken(sub string, ttl time.Duration) (string, error) {
 // the token is malformed, expired, or carries an invalid signature.
 // Constant-time HMAC comparison is used to prevent timing attacks.
 func VerifyProxyToken(tok string) (sub string, ok bool) {
+	secret := proxySecret()
+	if len(secret) == 0 {
+		// Fail closed: with no signing secret configured, no token is valid.
+		return "", false
+	}
 	dot := strings.LastIndex(tok, ".")
 	if dot < 0 {
 		return "", false
@@ -93,7 +109,7 @@ func VerifyProxyToken(tok string) (sub string, ok bool) {
 	b64sig := tok[dot+1:]
 
 	// Recompute expected MAC.
-	mac := hmac.New(sha256.New, proxySecret())
+	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(b64payload))
 	expected := mac.Sum(nil)
 

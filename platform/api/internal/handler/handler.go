@@ -54,6 +54,11 @@ type Handler struct {
 	SkillEvolver *runner.SkillEvolver
 	Sup          supervisor.Client // workspace-aware control-plane router (A2)
 
+	// ProxyCookieSecure controls the Secure attribute on the platform_proxy
+	// cookie. Read once at startup (from PLATFORM_PUBLIC_URL) and set in main,
+	// so SetProxySession never touches os.Getenv per request.
+	ProxyCookieSecure bool
+
 	verifMu     sync.Mutex
 	verifByTask map[string]*verify.BrowseResult
 
@@ -2369,15 +2374,22 @@ func (h *Handler) SetProxySession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token mint error", http.StatusInternalServerError)
 		return
 	}
+	if tok == "" {
+		// Fail-closed: no signing secret configured, so we refuse to issue a
+		// (forgeable) cookie. See auth.proxySecret / MintProxyToken.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"proxy session unavailable: signing secret not configured"}`))
+		return
+	}
 
-	secure := strings.HasPrefix(os.Getenv("PLATFORM_PUBLIC_URL"), "https")
 	http.SetCookie(w, &http.Cookie{
 		Name:     "platform_proxy",
 		Value:    tok,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   secure,
+		Secure:   h.ProxyCookieSecure,
 		MaxAge:   int(proxySessionTTL.Seconds()),
 	})
 	w.WriteHeader(http.StatusNoContent)
