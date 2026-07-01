@@ -337,7 +337,17 @@ func main() {
 
 	// All HTTP methods need to reverse-proxy through to the workflow — the
 	// dashboard might serve POST /api/* JSON endpoints, PUT uploads, etc.
-	r.HandleFunc("/d/{taskId}/*", h.ServeDashboard)
+	//
+	// Both proxy routes apply Optional auth + Workspace resolution so the auth
+	// context is populated. We do NOT hard-401 here: iframes cannot set
+	// Authorization headers, so unauthenticated requests pass through (the
+	// handler enforces membership only when claims are present).
+	r.Group(func(r chi.Router) {
+		r.Use(authMW.Optional)
+		r.Use(func(next http.Handler) http.Handler { return authMW.Workspace(taskStore)(next) })
+		r.HandleFunc("/d/{taskId}/*", h.ServeDashboard)
+		r.HandleFunc("/w/{ws}/d/{taskId}/*", h.ServeWorkspaceDashboard)
+	})
 
 	addr := envOr("PLATFORM_API_ADDR", ":8787")
 	log.Printf("api listening on %s", addr)

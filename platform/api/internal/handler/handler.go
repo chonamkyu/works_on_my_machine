@@ -2171,30 +2171,131 @@ func (h *Handler) ForkTask(w http.ResponseWriter, r *http.Request) {
 
 // --- dashboards -------------------------------------------------------
 
-// ServeDashboard reverse-proxies /d/<task_id>/[<name>/]<rest> to the
-// workflow's HTTP server. The workflow can declare multiple named ports
-// (UI, API, websocket, …) via task.Ports; each is exposed under its name.
-// The bare `/d/<task_id>/` form forwards to the "ui" role port (iframe
-// default).
+// checkWorkspaceMembership enforces that the caller is a member of the given
+// workspace. Returns true (authorized) in three cases:
+//  1. No identity in the context (unauthenticated — iframes in dev can't set headers).
+//  2. The caller is a platform admin.
+//  3. The caller is an explicit member of workspaceID.
 //
-// Unregistered names → 404. We never forward to ports the agent didn't
-// explicitly declare.
-//
-// WebSockets and SSE pass through. If the task has no live port mapping yet
-// (e.g. service still booting), we briefly retry — the workflow usually
-// binds within a second of spawn.
-func (h *Handler) ServeDashboard(w http.ResponseWriter, r *http.Request) {
-	taskID := chi.URLParam(r, "taskId")
+// Returns false and writes a 403 when claims ARE present but the membership
+// check fails.
+func (h *Handler) checkWorkspaceMembership(w http.ResponseWriter, r *http.Request, workspaceID string) bool {
+	claims := auth.ClaimsFromCtx(r.Context())
+	if claims == nil {
+		// Unauthenticated — allow through (iframes cannot set Authorization headers).
+		return true
+	}
+	if auth.IsAdmin(r.Context()) {
+		return true
+	}
+	if h.Store.IsMember(workspaceID, claims.Sub) {
+		return true
+	}
+	http.Error(w, "forbidden: not a member of this workspace", http.StatusForbidden)
+	return false
+}
 
-	// Path shape: /d/<task>/<rest...>. Peek the first segment of <rest> —
-	// if it matches a registered binding name, route there with a longer
-	// prefix strip; otherwise fall through to the "ui" port.
-	publicPrefix := "/d/" + taskID
+// proxyToTask resolves the upstream endpoint for taskID (in workspaceID) and
+// reverse-proxies the request. publicPrefix is the path prefix that should be
+// stripped from the inbound URL before forwarding (e.g. "/d/tsk_123" or
+// "/w/wsA/d/tsk_123").
+//
+// Port resolution order:
+//  1. When h.Sup is non-nil and Endpoint returns ok, use the supervisor's port map.
+//  2. Otherwise fall back to h.Ports (legacy portreg path).
+//
+// Bare prefix (no name segment after the prefix) → "ui" default.
+// Unregistered name → 404.
+func (h *Handler) proxyToTask(w http.ResponseWriter, r *http.Request, taskID, workspaceID, publicPrefix string) {
 	rest := strings.TrimPrefix(r.URL.Path, publicPrefix)
 	rest = strings.TrimPrefix(rest, "/")
 
+	// Determine the port and port name.
 	var port int
 	var name string
+
+	if h.Sup != nil {
+		base, ports, ok := h.Sup.Endpoint(workspaceID, taskID)
+		if !ok {
+			http.Error(w, "no dashboard running for this task", http.StatusNotFound)
+			return
+		}
+		// Peek the first segment of rest to see if it names a port.
+		if rest != "" {
+			first := rest
+			if i := strings.Index(rest, "/"); i >= 0 {
+				first = rest[:i]
+			}
+			if p, found := ports[first]; found {
+				port = p
+				name = first
+			}
+		}
+		if port == 0 {
+			// Fall back to "ui" port.
+			if p, found := ports["ui"]; found {
+				port = p
+			}
+		}
+		if port == 0 {
+			http.Error(w, "no dashboard running for this task. Declare a port (role:\"ui\") in the workflow's ports[].", http.StatusNotFound)
+			return
+		}
+
+		// When the caller explicitly asked for a named segment that is not in
+		// the map, reject instead of silently routing to "ui".
+		if rest != "" {
+			first := rest
+			if i := strings.Index(rest, "/"); i >= 0 {
+				first = rest[:i]
+			}
+			// first segment is not a known name and we fell through to ui?
+			// Only reject when the user asked for something that looks like a
+			// name (no dot, not empty) that is not registered.
+			if name == "" && first != "" && !strings.Contains(first, ".") {
+				if _, found := ports[first]; !found {
+					http.Error(w, "no port named "+first+" registered for this task", http.StatusNotFound)
+					return
+				}
+			}
+		}
+
+		// Build the upstream target from the supervisor-provided base URL and port.
+		targetURL := fmt.Sprintf("%s:%d", base, port)
+		stripPrefix := publicPrefix
+		publicBase := publicPrefix
+		if name != "" {
+			stripPrefix = publicPrefix + "/" + name
+			publicBase = stripPrefix
+		}
+
+		target, _ := url.Parse(targetURL)
+		proxy := &httputil.ReverseProxy{
+			Director: func(req *http.Request) {
+				req.URL.Scheme = target.Scheme
+				req.URL.Host = target.Host
+				req.Host = target.Host
+				req.URL.Path = strings.TrimPrefix(req.URL.Path, stripPrefix)
+				if req.URL.Path == "" {
+					req.URL.Path = "/"
+				}
+				req.Header.Set("X-Forwarded-Prefix", publicBase)
+				req.Header.Set("X-Forwarded-Proto", "http")
+				if _, hasUA := req.Header["User-Agent"]; !hasUA {
+					req.Header.Set("User-Agent", "")
+				}
+			},
+			Transport: &retryTransport{base: http.DefaultTransport, attempts: 3, gap: 400 * time.Millisecond},
+			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+				log.Printf("dashboard proxy error for %s (name=%q port=%d): %v", taskID, name, port, err)
+				http.Error(w, "dashboard upstream unreachable: "+err.Error(), http.StatusBadGateway)
+			},
+		}
+		proxy.ServeHTTP(w, r)
+		return
+	}
+
+	// Legacy portreg path (h.Sup is nil).
 	if rest != "" {
 		first := rest
 		if i := strings.Index(rest, "/"); i >= 0 {
@@ -2206,7 +2307,6 @@ func (h *Handler) ServeDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if port == 0 {
-		// No named match — try the "ui" default. If neither, 404.
 		if p, ok := h.Ports.Lookup(taskID); ok {
 			port = p
 		}
@@ -2216,9 +2316,6 @@ func (h *Handler) ServeDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The prefix to strip from the inbound URL so the workflow sees a clean
-	// path. When we routed via a name, the name itself is part of the
-	// prefix (the workflow doesn't know it lives under /<name>/).
 	stripPrefix := publicPrefix
 	publicBase := publicPrefix
 	if name != "" {
@@ -2249,6 +2346,51 @@ func (h *Handler) ServeDashboard(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+// ServeDashboard reverse-proxies /d/<task_id>/[<name>/]<rest> to the
+// workflow's HTTP server. This is the legacy alias kept for backward compat.
+// It resolves the task's owning workspace and applies membership authz.
+//
+// The bare `/d/<task_id>/` form forwards to the "ui" role port (iframe
+// default). Unregistered names → 404.
+func (h *Handler) ServeDashboard(w http.ResponseWriter, r *http.Request) {
+	taskID := chi.URLParam(r, "taskId")
+
+	task, err := h.Store.GetTask(taskID)
+	if err != nil {
+		http.Error(w, "task not found", http.StatusNotFound)
+		return
+	}
+
+	if !h.checkWorkspaceMembership(w, r, task.WorkspaceID) {
+		return
+	}
+
+	h.proxyToTask(w, r, taskID, task.WorkspaceID, "/d/"+taskID)
+}
+
+// ServeWorkspaceDashboard reverse-proxies /w/<ws>/d/<task_id>/[<name>/]<rest>
+// to the workflow's HTTP server, scoped to a specific workspace.
+//
+// Authorization: the caller must be a member of {ws}, or a platform admin. If
+// no identity is present (unauthenticated), the request passes through to
+// support dev iframes that cannot set Authorization headers.
+func (h *Handler) ServeWorkspaceDashboard(w http.ResponseWriter, r *http.Request) {
+	ws := chi.URLParam(r, "ws")
+	taskID := chi.URLParam(r, "taskId")
+
+	if !h.checkWorkspaceMembership(w, r, ws) {
+		return
+	}
+
+	task, err := h.Store.GetTask(taskID)
+	if err != nil || task.WorkspaceID != ws {
+		http.Error(w, "task not found", http.StatusNotFound)
+		return
+	}
+
+	h.proxyToTask(w, r, taskID, ws, "/w/"+ws+"/d/"+taskID)
 }
 
 // ListTaskPorts returns the live port-forwarding map for a task — what names
