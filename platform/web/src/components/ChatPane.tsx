@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Sparkles, KeyRound, ChevronsRight } from "lucide-react";
 import { api, subscribe, type SSEMessage } from "../lib/api";
-import { useGeneration, setGenerating, clearGeneration, getGeneration, appendPreview } from "../lib/generation";
+import { useGeneration, setGenerating, clearGeneration, getGeneration } from "../lib/generation";
 
 const USER_ID = "u_local";
 
@@ -117,7 +117,6 @@ export function ChatPane({
         | { delta?: string; name?: string; status?: string; intent?: string; mode?: string; error?: string }
         | undefined;
       if (payload.channel === "workflow:stream_delta" && typeof inner?.delta === "string") {
-        appendPreview(sessionId, inner.delta);
         setStreamPreview((s) => s + inner.delta);
         return;
       }
