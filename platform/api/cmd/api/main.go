@@ -372,9 +372,10 @@ func main() {
 	// dashboard might serve POST /api/* JSON endpoints, PUT uploads, etc.
 	//
 	// Both proxy routes apply Optional auth + Workspace resolution so the auth
-	// context is populated. We do NOT hard-401 here: iframes cannot set
-	// Authorization headers, so unauthenticated requests pass through (the
-	// handler enforces membership only when claims are present).
+	// context is populated. Iframes cannot set Authorization headers, so they
+	// carry identity via the signed platform_proxy cookie (set by POST
+	// /v1/proxy-session). Requests with no identity are rejected 403 by the
+	// handler — there is no unauthenticated pass-through in production.
 	r.Group(func(r chi.Router) {
 		r.Use(authMW.Optional)
 		r.Use(func(next http.Handler) http.Handler { return authMW.Workspace(taskStore)(next) })
