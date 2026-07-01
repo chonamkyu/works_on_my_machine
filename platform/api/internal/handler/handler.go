@@ -531,14 +531,22 @@ func (h *Handler) AcceptSkillProposal(w http.ResponseWriter, r *http.Request) {
 	// Publish into the global skills registry. Create the skill if it does not
 	// exist yet; otherwise append a new immutable version.
 	sk, lookupErr := h.Store.GetSkill(p.SkillName)
-	if sk == nil || lookupErr != nil {
+	switch {
+	case errors.Is(lookupErr, store.ErrNotFound):
 		// Skill does not exist — create it (version 1 + @latest alias).
 		if _, _, err := h.Store.CreateSkill(actor, p.SkillName, desc, nil, p.SkillBody, comment); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "registry create: " + err.Error()})
 			return
 		}
-	} else {
+	case lookupErr != nil:
+		// Real lookup error (e.g. transient DB failure). Do NOT attempt a
+		// create — that would wrongly hit the UNIQUE(name) constraint for an
+		// existing skill — and do NOT mark the proposal accepted.
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "registry lookup: " + lookupErr.Error()})
+		return
+	default:
 		// Skill already exists — publish an immutable new version.
+		_ = sk
 		if _, err := h.Store.PublishSkillVersion(p.SkillName, actor, desc, nil, p.SkillBody, comment); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "registry publish: " + err.Error()})
 			return

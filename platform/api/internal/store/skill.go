@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -124,7 +125,10 @@ func (m *Memory) GetSkill(name string) (*Skill, error) {
 		WHERE s.name = $1`, name)
 	sk, err := scanSkillRow(row)
 	if err != nil {
-		return nil, fmt.Errorf("skill not found: %s", name)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get skill %s: %w", name, err)
 	}
 	return sk, nil
 }

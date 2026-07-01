@@ -2,9 +2,22 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 )
+
+func TestGetSkillNotFoundSentinel(t *testing.T) {
+	if os.Getenv("PLATFORM_DB_URL") == "" {
+		t.Skip("no PLATFORM_DB_URL")
+	}
+	m := newTestMemory(t)
+
+	_, err := m.GetSkill("does-not-exist")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetSkill(does-not-exist): want errors.Is(err, ErrNotFound)==true, got %v", err)
+	}
+}
 
 func TestParseSkillRef(t *testing.T) {
 	tests := []struct {
