@@ -58,6 +58,12 @@ func claimsFromHeader(r *http.Request) (*Claims, error) {
 		if t := r.URL.Query().Get("access_token"); t != "" {
 			return DecodeJWT(t)
 		}
+		// Browser iframes carry the signed proxy-session cookie automatically.
+		if c, err := r.Cookie("platform_proxy"); err == nil && c.Value != "" {
+			if sub, ok := VerifyProxyToken(c.Value); ok {
+				return &Claims{Sub: sub}, nil
+			}
+		}
 		return nil, errMissingToken
 	}
 	return DecodeJWT(strings.TrimPrefix(h, "Bearer "))
