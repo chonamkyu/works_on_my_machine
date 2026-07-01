@@ -2408,9 +2408,9 @@ func (h *Handler) ServeDashboard(w http.ResponseWriter, r *http.Request) {
 // ServeWorkspaceDashboard reverse-proxies /w/<ws>/d/<task_id>/[<name>/]<rest>
 // to the workflow's HTTP server, scoped to a specific workspace.
 //
-// Authorization: the caller must be a member of {ws}, or a platform admin. If
-// no identity is present (unauthenticated), the request passes through to
-// support dev iframes that cannot set Authorization headers.
+// Authorization: the caller must be a member of {ws}, or a platform admin.
+// Unauthenticated requests are rejected (403); iframe auth is handled via the
+// signed platform_proxy cookie, set by POST /v1/proxy-session.
 func (h *Handler) ServeWorkspaceDashboard(w http.ResponseWriter, r *http.Request) {
 	ws := chi.URLParam(r, "ws")
 	taskID := chi.URLParam(r, "taskId")
