@@ -189,3 +189,29 @@ func (m *Memory) IsMember(workspaceID, sub string) bool {
 		)`, workspaceID, sub).Scan(&ok)
 	return ok
 }
+
+// DeleteWorkspace deletes a shared workspace. Personal workspaces cannot be
+// deleted. Only the workspace owner (or a platform admin) may delete.
+func (m *Memory) DeleteWorkspace(id, callerSub string, isAdmin bool) error {
+	ctx := context.Background()
+	var kind, ownerSub string
+	err := m.pool.QueryRow(ctx, `
+		SELECT kind, owner_sub FROM workspaces WHERE id=$1`, id).Scan(&kind, &ownerSub)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("workspace not found: %w", err)
+		}
+		return fmt.Errorf("DeleteWorkspace lookup: %w", err)
+	}
+	if kind == "personal" {
+		return fmt.Errorf("cannot delete personal workspace")
+	}
+	if ownerSub != callerSub && !isAdmin {
+		return fmt.Errorf("only the owner can delete a workspace")
+	}
+	_, err = m.pool.Exec(ctx, `DELETE FROM workspaces WHERE id=$1`, id)
+	if err != nil {
+		return fmt.Errorf("DeleteWorkspace: %w", err)
+	}
+	return nil
+}
