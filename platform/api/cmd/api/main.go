@@ -241,6 +241,19 @@ func main() {
 	}()
 	defer close(reapStop)
 
+	// MCP health ping loop.
+	mcpPingTick := 60 * time.Second
+	if v := envOr("PLATFORM_MCP_PING_TICK", ""); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			mcpPingTick = d
+		} else {
+			log.Printf("PLATFORM_MCP_PING_TICK: invalid duration %q, using default %v", v, mcpPingTick)
+		}
+	}
+	mcpCtx, mcpCancel := context.WithCancel(ctx)
+	go taskStore.RunMCPHealthLoop(mcpCtx, mcpPingTick)
+	defer mcpCancel()
+
 	sched := scheduler.NewCron(taskStore, sup)
 	sched.Start()
 	stopCron := make(chan struct{})
