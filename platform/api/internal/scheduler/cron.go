@@ -7,8 +7,8 @@ import (
 
 	"github.com/robfig/cron/v3"
 
-	"github.com/nk/platform/api/internal/runner"
 	"github.com/nk/platform/api/internal/store"
+	"github.com/nk/platform/api/internal/supervisor"
 )
 
 // Cron registers each task's enabled cron triggers with a single robfig/cron
@@ -16,14 +16,14 @@ import (
 // create/update events from the bus.
 type Cron struct {
 	store    *store.Memory
-	dispatch runner.Runner
+	dispatch supervisor.Client
 	cron     *cron.Cron
 
 	mu      sync.Mutex
 	entries map[string]cron.EntryID // key = "<task_id>/<trigger_id>"
 }
 
-func NewCron(s *store.Memory, d runner.Runner) *Cron {
+func NewCron(s *store.Memory, d supervisor.Client) *Cron {
 	return &Cron{
 		store:    s,
 		dispatch: d,
@@ -107,7 +107,7 @@ func (c *Cron) fireFor(taskID, triggerID string) func() {
 		if err != nil {
 			return
 		}
-		c.dispatch.Start(task, "cron:"+triggerID)
+		c.dispatch.StartRun(task.WorkspaceID, task, "cron:"+triggerID)
 	}
 }
 

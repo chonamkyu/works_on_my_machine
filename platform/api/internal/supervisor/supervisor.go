@@ -47,6 +47,18 @@ type Client interface {
 
 	// Health returns the liveness of the runtime for workspace ws.
 	Health(ws string) Status
+
+	// ServiceRunning reports whether a live daemon is currently running for
+	// taskID in workspace ws.
+	ServiceRunning(ws, taskID string) bool
+
+	// RestartService bounces a single service daemon (e.g. after accepting a
+	// code evolution PR).
+	RestartService(ws, taskID string) error
+
+	// BootServices starts all kind=service tasks across all workspaces.
+	// Called once at API boot.
+	BootServices() error
 }
 
 // Deps carries the shared dependencies that runtime backends need. It is a

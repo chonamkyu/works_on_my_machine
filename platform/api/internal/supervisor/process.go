@@ -100,3 +100,31 @@ func (p *Process) Endpoint(ws, taskID string) (base string, ports map[string]int
 func (p *Process) Health(ws string) Status {
 	return Status{Up: true}
 }
+
+// ServiceRunning reports whether a live daemon is currently running for
+// taskID in workspace ws.
+func (p *Process) ServiceRunning(ws, taskID string) bool {
+	if p.services == nil {
+		return false
+	}
+	return p.services.IsRunning(taskID)
+}
+
+// RestartService bounces the service daemon for taskID in workspace ws.
+func (p *Process) RestartService(ws, taskID string) error {
+	if p.services == nil {
+		return nil
+	}
+	p.services.Restart(taskID)
+	return nil
+}
+
+// BootServices starts all kind=service tasks across all workspaces. It
+// delegates to the ServiceManager's Start method, which reconciles the set of
+// enabled services on the first tick.
+func (p *Process) BootServices() error {
+	if p.services != nil {
+		p.services.Start()
+	}
+	return nil
+}

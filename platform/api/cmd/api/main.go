@@ -24,6 +24,7 @@ import (
 	"github.com/nk/platform/api/internal/runner"
 	"github.com/nk/platform/api/internal/scheduler"
 	"github.com/nk/platform/api/internal/store"
+	"github.com/nk/platform/api/internal/supervisor"
 	"github.com/nk/platform/api/internal/verify"
 )
 
@@ -183,19 +184,28 @@ func main() {
 	}()
 	defer close(pruneStop)
 
-	sched := scheduler.NewCron(taskStore, dispatch)
+	sup, err := supervisor.NewClient(envOr("PLATFORM_RUNTIME", "process"), supervisor.Deps{
+		Store:   taskStore,
+		Bus:     bus,
+		Files:   files,
+		Creds:   credStore,
+		Ports:   ports,
+		SDKPath: sdkPath,
+		Node:    "",
+	})
+	if err != nil {
+		log.Fatalf("supervisor: %v", err)
+	}
+	h.Sup = sup
+	if err := sup.BootServices(); err != nil {
+		log.Printf("supervisor boot: %v", err)
+	}
+
+	sched := scheduler.NewCron(taskStore, sup)
 	sched.Start()
 	stopCron := make(chan struct{})
 	go sched.PollLoop(15*time.Second, stopCron)
 	defer func() { close(stopCron); sched.Stop() }()
-
-	// Long-running service workflows (kind=service) — daemon supervisor.
-	// The reflection hook feeds every crash back through Reflection +
-	// Evolution so the service heals itself over time.
-	svc := runner.NewServiceManager(taskStore, nodeRunner, bus, hook, ports)
-	svc.Start()
-	defer svc.Stop()
-	h.Services = svc
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)

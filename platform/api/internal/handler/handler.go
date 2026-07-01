@@ -32,6 +32,7 @@ import (
 	"github.com/nk/platform/api/internal/reflection"
 	"github.com/nk/platform/api/internal/runner"
 	"github.com/nk/platform/api/internal/store"
+	"github.com/nk/platform/api/internal/supervisor"
 	"github.com/nk/platform/api/internal/verify"
 )
 
@@ -51,6 +52,7 @@ type Handler struct {
 	Verify       *verify.Client
 	Reflection   *reflection.Client
 	SkillEvolver *runner.SkillEvolver
+	Sup          supervisor.Client // workspace-aware control-plane router (A2)
 
 	verifMu     sync.Mutex
 	verifByTask map[string]*verify.BrowseResult
@@ -1122,6 +1124,13 @@ func (h *Handler) SetServiceEnabled(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		return
 	}
+	if h.Sup != nil {
+		if body.Enabled {
+			_ = h.Sup.EnsureService(t.WorkspaceID, t)
+		} else {
+			_ = h.Sup.StopService(t.WorkspaceID, t.ID)
+		}
+	}
 	writeJSON(w, http.StatusOK, t)
 }
 
@@ -1129,11 +1138,14 @@ func (h *Handler) SetServiceEnabled(w http.ResponseWriter, r *http.Request) {
 // running for this task.
 func (h *Handler) ServiceStatus(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if _, ok := h.taskForRequest(w, r, id); !ok {
+	task, ok := h.taskForRequest(w, r, id)
+	if !ok {
 		return
 	}
 	running := false
-	if h.Services != nil {
+	if h.Sup != nil {
+		running = h.Sup.ServiceRunning(task.WorkspaceID, id)
+	} else if h.Services != nil {
 		running = h.Services.IsRunning(id)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -1182,7 +1194,12 @@ func (h *Handler) TriggerRun(w http.ResponseWriter, r *http.Request) {
 	if body.Trigger == "" {
 		body.Trigger = "manual"
 	}
-	run := h.Runner.Start(t, body.Trigger)
+	var run *store.Run
+	if h.Sup != nil {
+		run = h.Sup.StartRun(t.WorkspaceID, t, body.Trigger)
+	} else {
+		run = h.Runner.Start(t, body.Trigger)
+	}
 	h.audit(r, "run.trigger", "run", run.ID, "")
 	writeJSON(w, http.StatusAccepted, run)
 }
@@ -1206,10 +1223,17 @@ func (h *Handler) GetRun(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) CancelRun(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if _, ok := h.runForRequest(w, r, id); !ok {
+	run, ok := h.runForRequest(w, r, id)
+	if !ok {
 		return
 	}
-	if !h.Runner.Cancel(id) {
+	cancelled := false
+	if h.Sup != nil {
+		cancelled = h.Sup.CancelRun(run.WorkspaceID, id)
+	} else {
+		cancelled = h.Runner.Cancel(id)
+	}
+	if !cancelled {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no active run"})
 		return
 	}
@@ -1734,8 +1758,12 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 				log.Printf("update write failed: %v", err)
 			}
 			h.scheduleDryRun(taskID, sessionID, wsID)
-			if task.Kind == "service" && h.Services != nil {
-				h.Services.Restart(taskID)
+			if task.Kind == "service" {
+				if h.Sup != nil {
+					_ = h.Sup.RestartService(task.WorkspaceID, taskID)
+				} else if h.Services != nil {
+					h.Services.Restart(taskID)
+				}
 				h.scheduleVerification(taskID, sessionID, wsID)
 			}
 		}
@@ -1896,7 +1924,11 @@ func (h *Handler) AcceptEvolutionPR(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	if h.Services != nil {
+	if h.Sup != nil {
+		if t, err := h.Store.GetTask(pr.TaskID); err == nil && t.Kind == "service" {
+			_ = h.Sup.RestartService(t.WorkspaceID, pr.TaskID)
+		}
+	} else if h.Services != nil {
 		if t, err := h.Store.GetTask(pr.TaskID); err == nil && t.Kind == "service" {
 			h.Services.Restart(pr.TaskID)
 		}
@@ -2057,7 +2089,12 @@ func (h *Handler) Webhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	run := h.Runner.Start(t, "webhook:"+matched.ID)
+	var run *store.Run
+	if h.Sup != nil {
+		run = h.Sup.StartRun(t.WorkspaceID, t, "webhook:"+matched.ID)
+	} else {
+		run = h.Runner.Start(t, "webhook:"+matched.ID)
+	}
 	writeJSON(w, http.StatusAccepted, run)
 }
 
@@ -2419,7 +2456,11 @@ Anything else without a slash is sent straight to the task's chat handler
 	case "run":
 		if t, err := h.Store.GetTask(sessionID); err == nil && t.Kind != "service" {
 			run := h.Store.CreateRun(sessionID, "manual")
-			go h.Runner.Start(t, "manual")
+			if h.Sup != nil {
+				go h.Sup.StartRun(t.WorkspaceID, t, "manual")
+			} else {
+				go h.Runner.Start(t, "manual")
+			}
 			writeJSON(w, http.StatusOK, map[string]any{"sessionId": sessionID, "reply": "started run " + run.ID})
 			return true
 		}
