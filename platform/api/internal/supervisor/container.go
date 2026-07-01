@@ -17,10 +17,10 @@ package supervisor
 // mappings (-p hostPort:containerPort) so the reverse-proxy can reach them
 // on localhost just like the process backend.
 //
-// Workflow exec: StartRun creates a run record via store.Memory and shells out
-// via "<runtime> exec <container> <cmd>" to invoke the workflow entrypoint.
-// When the SDK image is not the container image the exec will fail; the run
-// is recorded as RunFailed with a clear message.
+// Workflow exec: StartRun creates a run record via store.Memory and directly
+// execs "<runtime> exec -w <workflowDir> <container> node index.js" (no shell)
+// to invoke the workflow entrypoint. When the SDK image is not the container
+// image the exec will fail; the run is recorded as RunFailed with a clear message.
 
 import (
 	"bytes"
@@ -191,9 +191,13 @@ func (c *Container) buildCredEnvArgs(ws string) []string {
 }
 
 // removeWorkspaceContainer stops and removes the container for ws.
+// Removal of an already-gone container is treated as success (idempotent).
 func (c *Container) removeWorkspaceContainer(ws string) error {
 	name := containerName(ws)
 	if _, err := c.runCmd("rm", "-f", name); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "no such") {
+			return nil
+		}
 		return fmt.Errorf("supervisor: remove container for ws %q: %w", ws, err)
 	}
 	return nil
@@ -270,11 +274,12 @@ func (c *Container) StartRun(ws string, task *store.Task, trigger string) *store
 	// Workflow entrypoint: in a real SDK image this would be something like
 	// `node /workspace/sdk/dist/runner.js --taskId <id>`. With a generic image
 	// the command will likely fail — which is expected and documented.
-	workflowDir := "/workspace/workflows/" + task.ID
+	// Direct exec (no shell) avoids interpolating task.ID into a shell string.
+	// Go's exec captures stdout+stderr directly; no 2>&1 redirection needed.
+	scriptPath := "/workspace/workflows/" + task.ID + "/index.js"
 	execArgs := []string{
-		"exec", containerName(ws),
-		"sh", "-c",
-		fmt.Sprintf("cd %s && node index.js 2>&1", workflowDir),
+		"exec", "-w", "/workspace/workflows/" + task.ID, containerName(ws),
+		"node", scriptPath,
 	}
 
 	cancelCh := make(chan struct{})
