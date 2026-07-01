@@ -282,17 +282,17 @@ function PortsTab({ task }: { task: Task }) {
 
 function IframeView({ taskId }: { taskId: string }) {
   const origin = typeof window !== "undefined" ? window.location.origin : "";
-  const defaultUrl = `${origin}/d/${taskId}/`;
+  const defaultUrl = `/d/${taskId}/`;
   const [url, setUrl] = useState(defaultUrl);
-  const [draft, setDraft] = useState(defaultUrl);
+  const [draft, setDraft] = useState(`${origin}${defaultUrl}`);
   const [bust, setBust] = useState(0);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
-    setUrl(defaultUrl);
-    setDraft(defaultUrl);
+    setUrl(`/d/${taskId}/`);
+    setDraft(`${origin}/d/${taskId}/`);
     setBust((b) => b + 1);
-  }, [defaultUrl]);
+  }, [taskId, origin]);
 
   const go = () => {
     let next = draft.trim();
