@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -123,4 +124,35 @@ func (h *Handler) ListMembers(w http.ResponseWriter, r *http.Request) {
 		members = []*store.Member{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"members": members})
+}
+
+// DeleteWorkspace permanently deletes a shared workspace.
+// Personal workspaces are never deletable. Only the owner or a platform admin
+// may delete a shared workspace.
+//
+// DELETE /v1/workspaces/{id}
+func (h *Handler) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
+	caller := auth.MustUserID(r.Context())
+	if caller == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthenticated"})
+		return
+	}
+	id := chi.URLParam(r, "id")
+	isAdmin := auth.IsAdmin(r.Context())
+	if err := h.Store.DeleteWorkspace(id, caller, isAdmin); err != nil {
+		msg := err.Error()
+		switch {
+		case msg == "cannot delete personal workspace":
+			writeJSON(w, http.StatusConflict, map[string]any{"error": msg})
+		case msg == "only the owner can delete a workspace":
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": msg})
+		case strings.Contains(msg, "workspace not found"):
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": msg})
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": msg})
+		}
+		return
+	}
+	h.audit(r, "workspace.delete", "workspace", id, id)
+	w.WriteHeader(http.StatusNoContent)
 }

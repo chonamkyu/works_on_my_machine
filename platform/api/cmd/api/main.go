@@ -361,6 +361,7 @@ func main() {
 		r.Get("/me", h.Me)
 		r.Get("/workspaces", h.ListWorkspaces)
 		r.Post("/workspaces", h.CreateWorkspace)
+		r.Delete("/workspaces/{id}", h.DeleteWorkspace)
 		r.Post("/workspaces/{id}/members", h.InviteMember)
 		r.Delete("/workspaces/{id}/members/{uid}", h.RemoveMember)
 		r.Get("/workspaces/{id}/members", h.ListMembers)
