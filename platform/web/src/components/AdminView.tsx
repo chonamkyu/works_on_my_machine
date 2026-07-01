@@ -432,17 +432,26 @@ const HEALTH_LABEL: Record<"green" | "amber" | "red", string> = {
 };
 
 function TriggersTab() {
-  const [triggers, setTriggers] = useState<AdminTrigger[]>([]);
+  // `null` = not loaded yet / failed to load; `[]` = loaded but empty.
+  // Distinguishing these lets us show a real error state separate from
+  // a genuinely empty list (see the SelfEvolveTab pattern).
+  const [triggers, setTriggers] = useState<AdminTrigger[] | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
     api.adminListTriggers()
       .then(({ triggers: list }) => setTriggers(list ?? []))
-      .catch(console.error)
+      .catch((err) => {
+        console.error(err);
+        setError(true);
+      })
       .finally(() => setLoading(false));
   }, []);
 
   if (loading) return <p className="p-4 text-xs text-ink-subtle">loading…</p>;
+  if (error || !triggers)
+    return <p className="p-4 text-xs text-ink-tertiary">Failed to load triggers.</p>;
 
   return (
     <div className="p-4 space-y-3">
@@ -586,19 +595,21 @@ function SelfEvolveTab() {
       .finally(() => setLoading(false));
   }, []);
 
+  // Build a map from skill name → skill for fast lookup.
+  // NOTE: this hook MUST stay above the early returns below so the hook
+  // count is stable across renders (Rules of Hooks) — hence the null-safe `data?.`.
+  const skillByName = useMemo(() => {
+    const m = new Map<string, AdminSelfEvolve["recentSkillVersions"][number]>();
+    for (const s of data?.recentSkillVersions ?? []) {
+      m.set(s.name, s);
+    }
+    return m;
+  }, [data]);
+
   if (loading) return <p className="p-4 text-xs text-ink-subtle">loading…</p>;
   if (!data) return <p className="p-4 text-xs text-ink-tertiary">Failed to load self-evolve data.</p>;
 
   const { proposals, evolutionPRs, recentSkillVersions } = data;
-
-  // Build a map from skill name → skill for fast lookup
-  const skillByName = useMemo(() => {
-    const m = new Map<string, (typeof recentSkillVersions)[number]>();
-    for (const s of recentSkillVersions ?? []) {
-      m.set(s.name, s);
-    }
-    return m;
-  }, [recentSkillVersions]);
 
   const pending = (proposals ?? []).filter((p) => p.status === "pending");
   const accepted = (proposals ?? []).filter((p) => p.status === "accepted");
