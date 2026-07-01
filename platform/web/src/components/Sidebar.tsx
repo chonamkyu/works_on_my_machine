@@ -3,6 +3,7 @@ import { clsx } from "clsx";
 import { useMemo, useState } from "react";
 import { api } from "../lib/api";
 import type { Task } from "../lib/api";
+import { useGeneratingSet } from "../lib/generation";
 
 interface Props {
   tasks: Task[];
@@ -30,6 +31,7 @@ export function Sidebar({
   pulses,
 }: Props) {
   const [query, setQuery] = useState("");
+  const generatingIds = useGeneratingSet();
 
   const groups = useMemo(() => groupTasks(tasks, query), [tasks, query]);
 
@@ -83,7 +85,11 @@ export function Sidebar({
               )}
               title={t.name}
             >
-              <span className={glyphFor(t.status).color}>{glyphFor(t.status).symbol}</span>
+              {generatingIds.has(t.id) ? (
+                <span className="text-status-waiting animate-pulse">◐</span>
+              ) : (
+                <span className={glyphFor(t.status).color}>{glyphFor(t.status).symbol}</span>
+              )}
             </button>
           ))}
         </div>
@@ -133,6 +139,7 @@ export function Sidebar({
             onSelectTask={onSelectTask}
             onArchive={remove}
             pulses={pulses}
+            generatingIds={generatingIds}
           />
         ))}
       </div>
@@ -148,6 +155,7 @@ function Group({
   onSelectTask,
   onArchive,
   pulses,
+  generatingIds,
 }: {
   title: string;
   count: number;
@@ -156,6 +164,7 @@ function Group({
   onSelectTask: (id: string) => void;
   onArchive: (id: string, name: string, e: React.MouseEvent) => void;
   pulses: Record<string, number>;
+  generatingIds: Set<string>;
 }) {
   if (tasks.length === 0) return null;
   return (
@@ -172,6 +181,7 @@ function Group({
           task={t}
           active={t.id === selectedTaskId}
           pulsedAt={pulses[t.id]}
+          generating={generatingIds.has(t.id)}
           onClick={() => onSelectTask(t.id)}
           onArchive={(e) => onArchive(t.id, t.name, e)}
         />
@@ -184,16 +194,18 @@ function TaskRow({
   task,
   active,
   pulsedAt,
+  generating,
   onClick,
   onArchive,
 }: {
   task: Task;
   active: boolean;
   pulsedAt?: number;
+  generating?: boolean;
   onClick: () => void;
   onArchive: (e: React.MouseEvent) => void;
 }) {
-  const glyph = glyphFor(task.status);
+  const glyph = generating ? { symbol: "◐", color: "text-status-waiting" } : glyphFor(task.status);
   const recentPulse = pulsedAt && Date.now() - pulsedAt < 1500;
   return (
     <div
@@ -205,8 +217,8 @@ function TaskRow({
       )}
     >
       <span
-        className={clsx("text-[12px] leading-none w-3", glyph.color, recentPulse && "animate-pulse")}
-        aria-label={`status: ${task.status}`}
+        className={clsx("text-[12px] leading-none w-3", glyph.color, (recentPulse || generating) && "animate-pulse")}
+        aria-label={generating ? "generating" : `status: ${task.status}`}
       >
         {glyph.symbol}
       </span>
