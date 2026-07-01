@@ -209,6 +209,8 @@ func main() {
 	if v := envOr("PLATFORM_IDLE_REAP_TICK", ""); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			reapTick = d
+		} else {
+			log.Printf("PLATFORM_IDLE_REAP_TICK: invalid duration %q, using default %v", v, reapTick)
 		}
 	}
 	reapStop := make(chan struct{})

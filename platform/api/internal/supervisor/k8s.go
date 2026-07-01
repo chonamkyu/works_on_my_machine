@@ -369,26 +369,36 @@ func (k *K8s) BootServices() error {
 	return nil
 }
 
-// ReapIdle deletes pods for workspaces that have no enabled service task.
-// Workspaces with at least one non-disabled service task are considered
-// "warm" and their pods are left intact.
+// ReapIdle deletes pods for idle workspaces. A workspace is "warm" (preserved)
+// if it has at least one non-disabled service task OR an in-flight
+// (queued/running) run; only workspaces in neither set have their pods reaped.
+// This ensures a run is never killed mid-execution.
 //
 // Policy (conservative):
-//   - Build a warm-workspace set from store.ListServiceTasks().
+//   - Build the warm set from ListServiceTasks() ∪ WorkspacesWithActiveRuns().
 //   - List all namespaces with the label platform=workspace.
-//   - For each namespace whose workspace is NOT in the warm set, delete all
-//     pods in that namespace (scale-to-zero). Services are left; they can
-//     be restarted by EnsureService on next use.
+//   - For each namespace whose workspace is NOT warm, delete all pods in that
+//     namespace (scale-to-zero). Services are left; they can be restarted by
+//     EnsureService on next use.
+//   - If the store is nil or the active-run query errors, skip reaping to be safe.
 func (k *K8s) ReapIdle() error {
 	if k.deps.Store == nil {
 		return nil
 	}
 
-	// Build a set of workspaces that should stay warm.
-	serviceTasks := k.deps.Store.ListServiceTasks()
-	warmWS := make(map[string]bool, len(serviceTasks))
-	for _, t := range serviceTasks {
+	// Build the warm set: workspaces with a service task ...
+	warmWS := make(map[string]bool)
+	for _, t := range k.deps.Store.ListServiceTasks() {
 		warmWS[t.WorkspaceID] = true
+	}
+	// ... or with an in-flight run. On query error, skip reaping to be safe —
+	// killing a workspace with an active run is worse than leaving one idle.
+	activeRuns, err := k.deps.Store.WorkspacesWithActiveRuns()
+	if err != nil {
+		return nil
+	}
+	for ws := range activeRuns {
+		warmWS[ws] = true
 	}
 
 	ctx := context.Background()

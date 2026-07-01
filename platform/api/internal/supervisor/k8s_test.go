@@ -1,6 +1,7 @@
 package supervisor_test
 
 import (
+	"errors"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -323,11 +324,104 @@ func TestK8sReapIdle_NilStore(t *testing.T) {
 	}
 }
 
+// TestK8sReapIdle_PreservesWorkspaceWithActiveRun verifies that a workspace
+// with an in-flight (queued/running) run but NO service task is NOT reaped.
+// This guards against killing a oneshot run mid-execution.
+func TestK8sReapIdle_PreservesWorkspaceWithActiveRun(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+
+	// wsRunning has an active run but no service task — its pod must survive.
+	wsRunning := "running-ws"
+	taskRunning := svcTask(wsRunning, "task-running")
+	taskRunning.Kind = "oneshot" // not a service task
+
+	// wsIdle has neither a service task nor an active run — must be reaped.
+	wsIdle := "idle-ws"
+	taskIdle := svcTask(wsIdle, "task-idle")
+	taskIdle.Kind = "oneshot"
+
+	// Store reports no service tasks, but wsRunning has an active run.
+	fakeStore := &fakeServiceStore{
+		tasks:      nil,
+		activeRuns: map[string]bool{wsRunning: true},
+	}
+
+	deps := supervisor.Deps{Store: fakeStore}
+	k := supervisor.NewK8sWithClientForTest(cs, deps)
+
+	// Provision both workspaces (namespace + pod) via EnsureService.
+	if err := k.EnsureService(wsRunning, taskRunning); err != nil {
+		t.Fatalf("EnsureService running: %v", err)
+	}
+	if err := k.EnsureService(wsIdle, taskIdle); err != nil {
+		t.Fatalf("EnsureService idle: %v", err)
+	}
+
+	nsRunning := "platform-ws-" + wsRunning
+	nsIdle := "platform-ws-" + wsIdle
+
+	runningBefore, _ := cs.CoreV1().Pods(nsRunning).List(t.Context(), metav1.ListOptions{})
+	idleBefore, _ := cs.CoreV1().Pods(nsIdle).List(t.Context(), metav1.ListOptions{})
+	if len(runningBefore.Items) == 0 || len(idleBefore.Items) == 0 {
+		t.Fatal("both workspaces should have pods before reap")
+	}
+
+	if err := k.ReapIdle(); err != nil {
+		t.Fatalf("ReapIdle: %v", err)
+	}
+
+	// Workspace with an active run must be preserved.
+	runningAfter, _ := cs.CoreV1().Pods(nsRunning).List(t.Context(), metav1.ListOptions{})
+	if len(runningAfter.Items) == 0 {
+		t.Error("ReapIdle removed pods from a workspace with an active run — it should have been preserved")
+	}
+
+	// Idle workspace (no service task, no active run) must be reaped.
+	idleAfter, _ := cs.CoreV1().Pods(nsIdle).List(t.Context(), metav1.ListOptions{})
+	if len(idleAfter.Items) != 0 {
+		t.Errorf("ReapIdle left %d pod(s) in idle workspace; expected 0", len(idleAfter.Items))
+	}
+}
+
+// TestK8sReapIdle_SkipsWhenActiveRunQueryErrors verifies that when the active-run
+// query errors, ReapIdle skips reaping entirely (conservative safety) rather
+// than proceeding with an incomplete warm set.
+func TestK8sReapIdle_SkipsWhenActiveRunQueryErrors(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+
+	wsIdle := "idle-ws"
+	taskIdle := svcTask(wsIdle, "task-idle")
+	taskIdle.Kind = "oneshot"
+
+	fakeStore := &fakeServiceStore{runsErr: errQueryFailed}
+
+	deps := supervisor.Deps{Store: fakeStore}
+	k := supervisor.NewK8sWithClientForTest(cs, deps)
+
+	if err := k.EnsureService(wsIdle, taskIdle); err != nil {
+		t.Fatalf("EnsureService idle: %v", err)
+	}
+	ns := "platform-ws-" + wsIdle
+
+	if err := k.ReapIdle(); err != nil {
+		t.Fatalf("ReapIdle: %v", err)
+	}
+
+	// Query errored → nothing reaped; the pod must survive.
+	after, _ := cs.CoreV1().Pods(ns).List(t.Context(), metav1.ListOptions{})
+	if len(after.Items) == 0 {
+		t.Error("ReapIdle reaped a workspace despite an active-run query error; it should skip reaping to be safe")
+	}
+}
+
 // fakeServiceStore is a minimal supervisor.StoreClient substitute used in
-// tests to control which service tasks are returned by ListServiceTasks.
-// Only the methods needed by ReapIdle are meaningful; the others are no-ops.
+// tests to control which service tasks are returned by ListServiceTasks and
+// which workspaces have active runs. Only the methods needed by ReapIdle are
+// meaningful; the others are no-ops.
 type fakeServiceStore struct {
-	tasks []*store.Task
+	tasks      []*store.Task
+	activeRuns map[string]bool // workspace IDs with an in-flight run
+	runsErr    error           // when set, WorkspacesWithActiveRuns returns this
 }
 
 func (f *fakeServiceStore) ListServiceTasks() []*store.Task { return f.tasks }
@@ -336,4 +430,14 @@ func (f *fakeServiceStore) CreateRun(_, _ string) *store.Run { return &store.Run
 
 func (f *fakeServiceStore) UpdateRun(_ string, _ func(*store.Run)) (*store.Run, error) {
 	return &store.Run{}, nil
+}
+
+// errQueryFailed is a sentinel used by the active-run-query-error test.
+var errQueryFailed = errors.New("simulated active-run query failure")
+
+func (f *fakeServiceStore) WorkspacesWithActiveRuns() (map[string]bool, error) {
+	if f.runsErr != nil {
+		return nil, f.runsErr
+	}
+	return f.activeRuns, nil
 }

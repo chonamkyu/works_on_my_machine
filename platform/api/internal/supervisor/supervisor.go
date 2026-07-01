@@ -75,6 +75,10 @@ type StoreClient interface {
 	CreateRun(taskID, trigger string) *store.Run
 	UpdateRun(id string, mutate func(*store.Run)) (*store.Run, error)
 	ListServiceTasks() []*store.Task
+	// WorkspacesWithActiveRuns returns workspace IDs with an in-flight
+	// (queued/running) run. The idle reaper keeps these workspaces warm so a
+	// run is never killed mid-execution.
+	WorkspacesWithActiveRuns() (map[string]bool, error)
 }
 
 // Deps carries the shared dependencies that runtime backends need. It is a

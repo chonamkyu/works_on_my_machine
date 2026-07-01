@@ -418,56 +418,57 @@ func (c *Container) BootServices() error {
 	return nil
 }
 
-// ReapIdle stops and removes workspace containers for workspaces that have no
-// enabled service task. Workspaces with at least one non-disabled service task
-// are considered "warm" and are left running.
+// ReapIdle stops and removes workspace containers for idle workspaces.
+// A workspace is "warm" (preserved) if it has at least one non-disabled service
+// task OR an in-flight (queued/running) run; only workspaces in neither set are
+// reaped. This ensures a container is never removed mid-run.
 //
 // Policy (conservative):
-//   - Enumerate all running containers with the label platform=workspace.
+//   - Build the warm set from ListServiceTasks() ∪ WorkspacesWithActiveRuns().
+//   - Enumerate all containers with the label platform=workspace.
 //   - For each container, extract its platform.workspace label.
-//   - If the store has no service task for that workspace, remove the container.
-//   - If the store is unavailable (nil), skip reaping entirely to be safe.
+//   - If that workspace is not warm, remove the container.
+//   - If the store is unavailable (nil) or the active-run query errors, skip
+//     reaping entirely to be safe.
 func (c *Container) ReapIdle() error {
 	if c.deps.Store == nil {
 		return nil
 	}
 
-	// Build a set of workspaces that should stay warm (have a service task).
-	serviceTasks := c.deps.Store.ListServiceTasks()
-	warmWS := make(map[string]bool, len(serviceTasks))
-	for _, t := range serviceTasks {
+	// Build the warm set: workspaces with a service task ...
+	warmWS := make(map[string]bool)
+	for _, t := range c.deps.Store.ListServiceTasks() {
 		warmWS[t.WorkspaceID] = true
+	}
+	// ... or with an in-flight run. On query error, skip reaping to be safe —
+	// killing a workspace with an active run is worse than leaving one idle.
+	activeRuns, err := c.deps.Store.WorkspacesWithActiveRuns()
+	if err != nil {
+		return nil
+	}
+	for ws := range activeRuns {
+		warmWS[ws] = true
 	}
 
 	// List all containers managed by the platform.
 	out, err := c.runCmd("ps", "-a",
 		"--filter", "label=platform=workspace",
-		"--format", "{{.Names}}\t{{.Label \"platform.workspace\"}}",
+		"--format", "{{.Label \"platform.workspace\"}}",
 	)
 	if err != nil || out == "" {
 		return nil // nothing to reap or runtime unavailable
 	}
 
 	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		name := strings.TrimSpace(parts[0])
-		ws := strings.TrimSpace(parts[1])
+		ws := strings.TrimSpace(line)
 		if ws == "" || warmWS[ws] {
-			continue // workspace has a service task — keep the container warm
+			continue // workspace has a service task or active run — keep it warm
 		}
 
 		// Workspace is idle: stop and remove the container.
 		c.mu.Lock()
 		_ = c.removeWorkspaceContainer(ws)
 		c.mu.Unlock()
-		_ = name // name referenced above via removeWorkspaceContainer(ws) which builds the name internally
 	}
 
 	return nil

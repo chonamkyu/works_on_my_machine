@@ -415,6 +415,35 @@ func (m *Memory) UpdateRun(id string, mutate func(*Run)) (*Run, error) {
 	return r, err
 }
 
+// WorkspacesWithActiveRuns returns the set of workspace IDs that currently have
+// at least one in-flight (queued or running) run. The idle reaper uses this to
+// avoid killing a workspace runtime mid-execution: a workspace with an active
+// oneshot run must stay warm even if it has no service task.
+//
+// runs carry workspace_id directly (A1), so no join is needed.
+func (m *Memory) WorkspacesWithActiveRuns() (map[string]bool, error) {
+	rows, err := m.pool.Query(context.Background(), `
+		SELECT DISTINCT workspace_id FROM runs WHERE state IN ('queued','running')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]bool)
+	for rows.Next() {
+		var ws string
+		if err := rows.Scan(&ws); err != nil {
+			return nil, err
+		}
+		if ws != "" {
+			out[ws] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (m *Memory) ListRunsForTask(taskID string) []*Run {
 	rows, err := m.pool.Query(context.Background(), `
 		SELECT id, task_id, user_id, workspace_id, state, trigger, started_at, finished_at, duration_ms, output, error

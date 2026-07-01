@@ -257,3 +257,64 @@ func TestContainerHealthDownWhenNoContainer(t *testing.T) {
 		t.Error("Health should return Up:false for workspace with no container")
 	}
 }
+
+// TestContainerReapIdle_PreservesWorkspaceWithActiveRun verifies that ReapIdle
+// keeps a workspace container alive when that workspace has an in-flight run,
+// even though it has no service task, while reaping a truly idle workspace.
+// Requires a container runtime (podman/docker) and a small local image.
+func TestContainerReapIdle_PreservesWorkspaceWithActiveRun(t *testing.T) {
+	rt := skipIfNoRuntime(t)
+
+	image, ok := preferredImage(rt)
+	if !ok {
+		t.Skip("no suitable local image found (ubuntu:24.04 / alpine); skipping to avoid slow image pull")
+	}
+	t.Setenv("PLATFORM_CONTAINER_IMAGE", image)
+
+	wsRunning := "reap-run-" + testRandID() // has an active run, no service task
+	wsIdle := "reap-idle-" + testRandID()   // neither — must be reaped
+
+	// Store: no service tasks, but wsRunning has an active run.
+	fakeStore := &fakeServiceStore{
+		tasks:      nil,
+		activeRuns: map[string]bool{wsRunning: true},
+	}
+
+	deps := supervisor.Deps{Store: fakeStore}
+	c, err := supervisor.NewClient("container", deps)
+	if err != nil {
+		t.Fatalf("NewClient(\"container\"): %v", err)
+	}
+
+	nameRunning := "platform-ws-" + wsRunning
+	nameIdle := "platform-ws-" + wsIdle
+	t.Cleanup(func() {
+		_ = exec.Command(rt, "rm", "-f", nameRunning).Run()
+		_ = exec.Command(rt, "rm", "-f", nameIdle).Run()
+	})
+
+	// Provision both workspace containers.
+	if err := c.EnsureService(wsRunning, &store.Task{ID: "t-run", WorkspaceID: wsRunning}); err != nil {
+		t.Fatalf("EnsureService running: %v", err)
+	}
+	if err := c.EnsureService(wsIdle, &store.Task{ID: "t-idle", WorkspaceID: wsIdle}); err != nil {
+		t.Fatalf("EnsureService idle: %v", err)
+	}
+
+	if err := c.ReapIdle(); err != nil {
+		t.Fatalf("ReapIdle: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	psOut, _ := exec.Command(rt, "ps", "-a", "--format", "{{.Names}}").CombinedOutput()
+	ps := string(psOut)
+
+	// Workspace with an active run must survive.
+	if !strings.Contains(ps, nameRunning) {
+		t.Errorf("ReapIdle removed container %q for a workspace with an active run; ps -a:\n%s", nameRunning, ps)
+	}
+	// Truly idle workspace must be reaped.
+	if strings.Contains(ps, nameIdle) {
+		t.Errorf("ReapIdle left idle container %q; ps -a:\n%s", nameIdle, ps)
+	}
+}
