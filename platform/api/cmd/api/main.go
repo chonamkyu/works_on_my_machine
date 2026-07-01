@@ -422,6 +422,11 @@ func main() {
 			r.Post("/admin/users/{sub}/admin", h.SetUserAdmin)
 			r.Post("/admin/users/{sub}/disabled", h.SetUserDisabled)
 			r.Get("/admin/audit", h.ListAudit)
+			// Observability endpoints (D-task-1)
+			r.Get("/admin/overview", h.AdminOverview)
+			r.Get("/admin/workspaces", h.AdminListWorkspaces)
+			r.Get("/admin/triggers", h.AdminListTriggers)
+			r.Get("/admin/self-evolve", h.AdminSelfEvolve)
 		})
 	})
 
