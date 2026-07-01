@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useAuth } from "react-oidc-context";
 import type { Task, SSEMessage } from "./lib/api";
 import { api, subscribe, establishProxySession } from "./lib/api";
@@ -273,6 +273,47 @@ function AuthTokenSync() {
     }
   }, [auth.user?.access_token]);
   return null;
+}
+
+/** Splash shown while the OIDC redirect / callback is in flight. */
+function AuthSplash({ text, action }: { text: string; action?: { label: string; onClick: () => void } }) {
+  return (
+    <div className="h-full flex flex-col items-center justify-center bg-canvas text-ink-muted gap-4">
+      <p className="text-[13px] font-mono">{text}</p>
+      {action && (
+        <button
+          onClick={action.onClick}
+          className="h-9 px-4 rounded-md bg-accent text-white text-[13px] hover:bg-accent-hover"
+        >
+          {action.label}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** Auth gate for Keycloak (non-dev) mode: redirects unauthenticated users to
+ *  the SSO login, shows a splash while the redirect/callback is in flight, and
+ *  only renders the app once a session exists. Rendered inside <AuthProvider>. */
+export function AuthGate({ children }: { children: ReactNode }) {
+  const auth = useAuth();
+  useEffect(() => {
+    if (!auth.isLoading && !auth.isAuthenticated && !auth.activeNavigator && !auth.error) {
+      void auth.signinRedirect();
+    }
+  }, [auth.isLoading, auth.isAuthenticated, auth.activeNavigator, auth.error]);
+
+  if (auth.error) {
+    return (
+      <AuthSplash
+        text={`Sign-in failed: ${auth.error.message}`}
+        action={{ label: "Retry", onClick: () => void auth.signinRedirect() }}
+      />
+    );
+  }
+  if (auth.isLoading || auth.activeNavigator) return <AuthSplash text="Signing in…" />;
+  if (!auth.isAuthenticated) return <AuthSplash text="Redirecting to sign-in…" />;
+  return <>{children}</>;
 }
 
 function EmptyChat({ onNewTask }: { onNewTask: () => Promise<void> }) {
