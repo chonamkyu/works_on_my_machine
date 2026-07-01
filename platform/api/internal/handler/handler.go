@@ -1664,8 +1664,12 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 		deleted := []string{}
 		for _, id := range outcome.TargetTaskIDs {
 			h.archiveBeforeDelete(id)
+			taskWsID := wsID
+			if t, err := h.Store.GetTask(id); err == nil {
+				taskWsID = t.WorkspaceID
+			}
 			if err := h.Store.DeleteTask(id); err == nil {
-				_ = os.RemoveAll(h.Files.Dir(wsID, id))
+				_ = os.RemoveAll(h.Files.Dir(taskWsID, id))
 				deleted = append(deleted, id)
 				h.Bus.Publish(store.Event{
 					Channel: "task:archived:" + wsID,
@@ -2402,9 +2406,12 @@ Anything else without a slash is sent straight to the task's chat handler
 		writeJSON(w, http.StatusOK, map[string]any{"sessionId": sessionID, "reply": "renamed to " + rest})
 		return true
 	case "archive":
+		archiveWsID := auth.MustWorkspaceID(r.Context())
+		if t, err := h.Store.GetTask(sessionID); err == nil {
+			archiveWsID = t.WorkspaceID
+		}
 		h.archiveBeforeDelete(sessionID)
 		_ = h.Store.DeleteTask(sessionID)
-		archiveWsID := auth.MustWorkspaceID(r.Context())
 		_ = os.RemoveAll(h.Files.Dir(archiveWsID, sessionID))
 		h.Bus.Publish(store.Event{Channel: "task:archived:" + archiveWsID, UserID: archiveWsID, TaskID: sessionID})
 		writeJSON(w, http.StatusOK, map[string]any{"sessionId": sessionID, "reply": "archived."})
