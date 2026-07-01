@@ -55,11 +55,15 @@ export function WorkspaceSwitcher({ workspaces, activeWs, onSwitch, onRefetch }:
 
   async function handleDelete(ws: Workspace) {
     if (!window.confirm(`Delete workspace "${ws.name}"?`)) return;
-    await api.deleteWorkspace(ws.id);
-    onRefetch();
-    // If deleted workspace was active, fall back to personal.
-    if (ws.id === activeWs && personal) {
-      onSwitch(personal.id);
+    try {
+      await api.deleteWorkspace(ws.id);
+      onRefetch();
+      // If deleted workspace was active, fall back to personal.
+      if (ws.id === activeWs && personal) {
+        onSwitch(personal.id);
+      }
+    } catch (err) {
+      console.error("Failed to delete workspace:", err);
     }
   }
 
