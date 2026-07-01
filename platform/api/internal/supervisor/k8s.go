@@ -26,6 +26,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
@@ -114,13 +115,11 @@ func k8sImage() string {
 }
 
 // ensureNamespace creates the namespace for ws if it does not already exist.
+// It attempts Create directly and treats AlreadyExists as success, avoiding
+// a Get-then-Create race under concurrent callers.
 func (k *K8s) ensureNamespace(ctx context.Context, ws string) error {
 	ns := wsNamespace(ws)
-	_, err := k.cs.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
-	if err == nil {
-		return nil // already exists
-	}
-	_, err = k.cs.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
+	_, err := k.cs.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: ns,
 			Labels: map[string]string{
@@ -129,7 +128,7 @@ func (k *K8s) ensureNamespace(ctx context.Context, ws string) error {
 			},
 		},
 	}, metav1.CreateOptions{})
-	if err != nil {
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
 		return fmt.Errorf("supervisor/k8s: create namespace %q: %w", ns, err)
 	}
 	return nil
@@ -156,64 +155,58 @@ func (k *K8s) EnsureService(ws string, task *store.Task) error {
 		k8sTaskLabel:      task.ID,
 	}
 
-	// Create pod if absent.
-	_, err := k.cs.CoreV1().Pods(ns).Get(ctx, pName, metav1.GetOptions{})
-	if err != nil {
-		_, err = k.cs.CoreV1().Pods(ns).Create(ctx, &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      pName,
-				Namespace: ns,
-				Labels:    labels,
-			},
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name:  "workflow",
-						Image: k8sImage(),
-						Ports: []corev1.ContainerPort{
-							{ContainerPort: k8sContainerPort, Protocol: corev1.ProtocolTCP},
-						},
-						Env: []corev1.EnvVar{
-							{Name: "PLATFORM_WORKSPACE", Value: ws},
-							{Name: "PLATFORM_TASK", Value: task.ID},
-						},
+	// Create pod — tolerate AlreadyExists for idempotency under concurrent callers.
+	_, err := k.cs.CoreV1().Pods(ns).Create(ctx, &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pName,
+			Namespace: ns,
+			Labels:    labels,
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "workflow",
+					Image: k8sImage(),
+					Ports: []corev1.ContainerPort{
+						{ContainerPort: k8sContainerPort, Protocol: corev1.ProtocolTCP},
+					},
+					Env: []corev1.EnvVar{
+						{Name: "PLATFORM_WORKSPACE", Value: ws},
+						{Name: "PLATFORM_TASK", Value: task.ID},
 					},
 				},
-				RestartPolicy: corev1.RestartPolicyAlways,
 			},
-		}, metav1.CreateOptions{})
-		if err != nil {
-			return fmt.Errorf("supervisor/k8s: create pod for ws %q task %q: %w", ws, task.ID, err)
-		}
+			RestartPolicy: corev1.RestartPolicyAlways,
+		},
+	}, metav1.CreateOptions{})
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
+		return fmt.Errorf("supervisor/k8s: create pod for ws %q task %q: %w", ws, task.ID, err)
 	}
 
-	// Create service if absent.
-	_, err = k.cs.CoreV1().Services(ns).Get(ctx, sName, metav1.GetOptions{})
-	if err != nil {
-		_, err = k.cs.CoreV1().Services(ns).Create(ctx, &corev1.Service{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      sName,
-				Namespace: ns,
-				Labels:    labels,
+	// Create service — tolerate AlreadyExists for idempotency under concurrent callers.
+	_, err = k.cs.CoreV1().Services(ns).Create(ctx, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sName,
+			Namespace: ns,
+			Labels:    labels,
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				k8sWorkspaceLabel: ws,
+				k8sTaskLabel:      task.ID,
 			},
-			Spec: corev1.ServiceSpec{
-				Selector: map[string]string{
-					k8sWorkspaceLabel: ws,
-					k8sTaskLabel:      task.ID,
+			Ports: []corev1.ServicePort{
+				{
+					Port:       k8sServicePort,
+					TargetPort: intstr.FromInt(k8sContainerPort),
+					Protocol:   corev1.ProtocolTCP,
 				},
-				Ports: []corev1.ServicePort{
-					{
-						Port:       k8sServicePort,
-						TargetPort: intstr.FromInt(k8sContainerPort),
-						Protocol:   corev1.ProtocolTCP,
-					},
-				},
-				Type: corev1.ServiceTypeClusterIP,
 			},
-		}, metav1.CreateOptions{})
-		if err != nil {
-			return fmt.Errorf("supervisor/k8s: create service for ws %q task %q: %w", ws, task.ID, err)
-		}
+			Type: corev1.ServiceTypeClusterIP,
+		},
+	}, metav1.CreateOptions{})
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
+		return fmt.Errorf("supervisor/k8s: create service for ws %q task %q: %w", ws, task.ID, err)
 	}
 
 	return nil
@@ -226,14 +219,14 @@ func (k *K8s) StopService(ws, taskID string) error {
 
 	// Delete pod — ignore "not found".
 	if err := k.cs.CoreV1().Pods(ns).Delete(ctx, wsPodName(ws, taskID), metav1.DeleteOptions{}); err != nil {
-		if !k8sIsNotFound(err) {
+		if !k8serrors.IsNotFound(err) {
 			return fmt.Errorf("supervisor/k8s: delete pod for ws %q task %q: %w", ws, taskID, err)
 		}
 	}
 
 	// Delete service — ignore "not found".
 	if err := k.cs.CoreV1().Services(ns).Delete(ctx, wsServiceName(ws, taskID), metav1.DeleteOptions{}); err != nil {
-		if !k8sIsNotFound(err) {
+		if !k8serrors.IsNotFound(err) {
 			return fmt.Errorf("supervisor/k8s: delete service for ws %q task %q: %w", ws, taskID, err)
 		}
 	}
@@ -354,7 +347,7 @@ func (k *K8s) RestartService(ws, taskID string) error {
 	ns := wsNamespace(ws)
 
 	err := k.cs.CoreV1().Pods(ns).Delete(ctx, wsPodName(ws, taskID), metav1.DeleteOptions{})
-	if err != nil && !k8sIsNotFound(err) {
+	if err != nil && !k8serrors.IsNotFound(err) {
 		return fmt.Errorf("supervisor/k8s: restart pod for ws %q task %q: %w", ws, taskID, err)
 	}
 	return nil
@@ -376,18 +369,3 @@ func (k *K8s) BootServices() error {
 	return nil
 }
 
-// ---- helpers ----------------------------------------------------------------
-
-// k8sIsNotFound returns true for Kubernetes 404 errors.
-func k8sIsNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	type statusError interface {
-		Status() metav1.Status
-	}
-	if se, ok := err.(statusError); ok {
-		return se.Status().Code == 404
-	}
-	return false
-}

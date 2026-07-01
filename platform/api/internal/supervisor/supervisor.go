@@ -85,8 +85,7 @@ type Deps struct {
 //   - "container" — per-workspace OCI containers via Podman/Docker
 //   - "k8s"       — per-workspace Kubernetes pods
 //
-// All three return errUnsupported until the corresponding A2 task lands their
-// backend implementations.
+// All three backends are implemented. An unknown kind returns an error.
 func NewClient(kind string, deps Deps) (Client, error) {
 	switch kind {
 	case "process":
