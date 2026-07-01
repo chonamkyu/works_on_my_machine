@@ -218,6 +218,7 @@ export interface AuditEntry {
   resourceType: string;
   resourceId: string;
   resourceName: string;
+  details?: Record<string, unknown>;
   createdAt: string;
 }
 
@@ -465,6 +466,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ disabled }),
     }),
+  adminListAudit: (limit = 200) =>
+    http<{ entries: AuditEntry[] }>(`/v1/admin/audit?limit=${limit}`),
 };
 
 export interface Workspace {

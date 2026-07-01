@@ -12,10 +12,10 @@
  * Sub-tab state is local (URL only carries top-level overlay param).
  */
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { clsx } from "clsx";
 import { api } from "../lib/api";
-import type { AdminOverview, AdminWorkspace, User } from "../lib/api";
+import type { AdminOverview, AdminWorkspace, AuditEntry, User } from "../lib/api";
 
 // ---------------------------------------------------------------------------
 // Sub-tab types
@@ -308,6 +308,100 @@ function WorkspacesTab() {
 }
 
 // ---------------------------------------------------------------------------
+// Audit tab
+// ---------------------------------------------------------------------------
+
+function AuditTab() {
+  const [entries, setEntries] = useState<AuditEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState("");
+
+  useEffect(() => {
+    api.adminListAudit(200)
+      .then(({ entries: list }) => setEntries(list ?? []))
+      .catch(console.error)
+      .finally(() => setLoading(false));
+  }, []);
+
+  const filtered = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return entries;
+    return entries.filter((e) => {
+      const actor = (e.actorEmail || e.actorSub).toLowerCase();
+      const resource = `${e.resourceType} ${e.resourceName} ${e.resourceId}`.toLowerCase();
+      const workspace = e.workspaceId.toLowerCase();
+      return (
+        e.action.toLowerCase().includes(q) ||
+        actor.includes(q) ||
+        resource.includes(q) ||
+        workspace.includes(q)
+      );
+    });
+  }, [entries, filter]);
+
+  if (loading) return <p className="p-4 text-xs text-ink-subtle">loading…</p>;
+
+  return (
+    <div className="p-4 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="font-mono text-[10px] uppercase tracking-wider text-ink-subtle">
+          audit log · {filtered.length}{filter && entries.length !== filtered.length ? ` / ${entries.length}` : ""}
+        </div>
+        <input
+          type="text"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter by action, actor, resource, workspace…"
+          className="text-xs bg-canvas border border-hairline rounded px-2 py-1 text-ink placeholder:text-ink-tertiary focus:outline-none focus:ring-1 focus:ring-accent w-64"
+        />
+      </div>
+
+      {entries.length === 0 ? (
+        <p className="text-xs text-ink-tertiary">No audit entries found.</p>
+      ) : filtered.length === 0 ? (
+        <p className="text-xs text-ink-tertiary">No entries match the filter.</p>
+      ) : (
+        <div className="border border-hairline rounded overflow-hidden">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-hairline bg-surface-2">
+                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary whitespace-nowrap">time</th>
+                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">actor</th>
+                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">action</th>
+                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">resource</th>
+                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">workspace</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((entry) => (
+                <tr key={entry.id} className="border-b border-hairline last:border-0 hover:bg-surface-2/50">
+                  <td className="px-3 py-1.5 font-mono text-ink-tertiary whitespace-nowrap">
+                    {new Date(entry.createdAt).toLocaleString()}
+                  </td>
+                  <td className="px-3 py-1.5 text-ink-muted truncate max-w-[140px]">
+                    {entry.actorEmail || entry.actorSub}
+                  </td>
+                  <td className="px-3 py-1.5 font-mono text-accent whitespace-nowrap">{entry.action}</td>
+                  <td className="px-3 py-1.5 text-ink-muted truncate max-w-[180px]">
+                    <span className="text-ink-tertiary">{entry.resourceType}</span>
+                    {(entry.resourceName || entry.resourceId) && (
+                      <span>: {entry.resourceName || entry.resourceId}</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-1.5 font-mono text-ink-tertiary text-[10px] truncate max-w-[120px]">
+                    {entry.workspaceId || "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // AdminView
 // ---------------------------------------------------------------------------
 
@@ -384,9 +478,7 @@ export function AdminView() {
         )}
         {activeTab === "users" && <UsersTab />}
         {activeTab === "workspaces" && <WorkspacesTab />}
-        {activeTab === "audit" && (
-          <div className="p-4 text-xs text-ink-tertiary">Coming in D3</div>
-        )}
+        {activeTab === "audit" && <AuditTab />}
         {activeTab === "triggers" && (
           <div className="p-4 text-xs text-ink-tertiary">Coming in D3/D4</div>
         )}
