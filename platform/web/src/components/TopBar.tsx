@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Cog, Search, ShieldCheck } from "lucide-react";
 import { api, type Workspace, type Me } from "../lib/api";
 import { setActiveWorkspace } from "../lib/auth";
+import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
 interface Props {
   onOpenPalette: () => void;
@@ -74,29 +75,17 @@ export function TopBar({ onOpenPalette, onOpenSettings, onOpenAdmin }: Props) {
     writeWsToUrl(id);
   }
 
-  function handleWsChange(e: React.ChangeEvent<HTMLSelectElement>) {
-    applyWorkspace(e.target.value);
-  }
-
   return (
     <header className="h-11 border-b border-hairline bg-canvas flex items-center px-3 gap-3 text-ink-muted">
       <span className="font-mono text-[11px] tracking-[0.14em] text-ink-subtle select-none">
         works_on_my_machine
       </span>
-      {workspaces.length > 0 && (
-        <select
-          value={activeWs ?? ""}
-          onChange={handleWsChange}
-          className="h-6 px-1.5 rounded border border-hairline bg-surface-1 text-[11px] text-ink-subtle hover:border-hairline-strong focus:outline-none"
-          title="Active workspace"
-        >
-          {workspaces.map((w) => (
-            <option key={w.id} value={w.id}>
-              {w.name}
-            </option>
-          ))}
-        </select>
-      )}
+      <WorkspaceSwitcher
+        workspaces={workspaces}
+        activeWs={activeWs}
+        onSwitch={applyWorkspace}
+        onRefetch={loadWorkspaces}
+      />
       <div className="flex-1" />
       <button
         onClick={onOpenPalette}
