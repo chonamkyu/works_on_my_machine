@@ -178,6 +178,7 @@ export function App() {
       <TopBar
         onOpenPalette={() => setPaletteOpen(true)}
         onOpenSettings={() => setOverlay("settings")}
+        onOpenAdmin={() => setOverlay("admin")}
       />
       <div className="flex-1 flex min-h-0">
         <Sidebar

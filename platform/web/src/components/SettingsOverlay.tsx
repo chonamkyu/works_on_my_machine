@@ -7,7 +7,8 @@
  * shared frame and a side tab list.
  */
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { api, type Me } from "../lib/api";
 import { MemoryView } from "./MemoryView";
 import { EvolutionView } from "./EvolutionView";
 import { DiscoverView } from "./DiscoverView";
@@ -18,15 +19,16 @@ import { AdminView } from "./AdminView";
 
 export type OverlayTab = "settings" | "memory" | "evolution" | "discover" | "skills" | "mcp" | "admin";
 
-const TABS: { id: OverlayTab; label: string; hint: string }[] = [
+const BASE_TABS: { id: OverlayTab; label: string; hint: string }[] = [
   { id: "settings", label: "Settings", hint: "⌘," },
   { id: "memory", label: "Memory", hint: "" },
   { id: "evolution", label: "Evolution", hint: "" },
   { id: "discover", label: "Discover", hint: "" },
   { id: "skills", label: "Skills", hint: "" },
   { id: "mcp", label: "MCP Servers", hint: "" },
-  { id: "admin", label: "Admin", hint: "" },
 ];
+
+const ADMIN_TAB: { id: OverlayTab; label: string; hint: string } = { id: "admin", label: "Admin", hint: "" };
 
 interface Props {
   open: boolean;
@@ -36,6 +38,21 @@ interface Props {
 }
 
 export function SettingsOverlay({ open, tab, onTab, onClose }: Props) {
+  const [me, setMe] = useState<Me | null>(null);
+
+  // Fetch /v1/me when overlay opens to determine admin status.
+  useEffect(() => {
+    if (!open) return;
+    api.getMe().then(setMe).catch(() => { /* not authed yet */ });
+  }, [open]);
+
+  // If requested tab is "admin" but user isn't admin, fall back to "settings".
+  useEffect(() => {
+    if (open && tab === "admin" && me !== null && !me.isAdmin) {
+      onTab("settings");
+    }
+  }, [open, tab, me, onTab]);
+
   useEffect(() => {
     if (!open) return;
     const h = (e: KeyboardEvent) => {
@@ -46,6 +63,11 @@ export function SettingsOverlay({ open, tab, onTab, onClose }: Props) {
   }, [open, onClose]);
 
   if (!open) return null;
+
+  const tabs = me?.isAdmin ? [...BASE_TABS, ADMIN_TAB] : BASE_TABS;
+  // Ensure the active tab is valid for this user.
+  const activeTab = tab === "admin" && !me?.isAdmin ? "settings" : tab;
+
   return (
     <div
       className="fixed inset-0 z-40 flex items-center justify-center p-6 bg-canvas/70 backdrop-blur-sm"
@@ -59,12 +81,12 @@ export function SettingsOverlay({ open, tab, onTab, onClose }: Props) {
           <div className="px-3 pb-3 font-mono text-[10px] uppercase tracking-wider text-ink-tertiary">
             preferences
           </div>
-          {TABS.map((t) => (
+          {tabs.map((t) => (
             <button
               key={t.id}
               onClick={() => onTab(t.id)}
               className={`text-left px-3 h-8 rounded text-sm flex items-center justify-between ${
-                tab === t.id ? "bg-surface-3 text-ink" : "text-ink-muted hover:bg-surface-2"
+                activeTab === t.id ? "bg-surface-3 text-ink" : "text-ink-muted hover:bg-surface-2"
               }`}
             >
               <span>{t.label}</span>
@@ -76,13 +98,13 @@ export function SettingsOverlay({ open, tab, onTab, onClose }: Props) {
           </div>
         </aside>
         <main className="flex-1 overflow-y-auto">
-          {tab === "settings" && <SettingsView />}
-          {tab === "memory" && <MemoryView />}
-          {tab === "evolution" && <EvolutionView />}
-          {tab === "discover" && <DiscoverView />}
-          {tab === "skills" && <SkillsView />}
-          {tab === "mcp" && <McpView />}
-          {tab === "admin" && <AdminView />}
+          {activeTab === "settings" && <SettingsView />}
+          {activeTab === "memory" && <MemoryView />}
+          {activeTab === "evolution" && <EvolutionView />}
+          {activeTab === "discover" && <DiscoverView />}
+          {activeTab === "skills" && <SkillsView />}
+          {activeTab === "mcp" && <McpView />}
+          {activeTab === "admin" && me?.isAdmin && <AdminView />}
         </main>
       </div>
     </div>

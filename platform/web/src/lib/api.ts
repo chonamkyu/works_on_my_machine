@@ -520,6 +520,7 @@ export interface Workspace {
   id: string;
   name: string;
   kind: "personal" | "team" | string;
+  ownerSub?: string;
   createdAt: string;
 }
 

@@ -11,18 +11,18 @@ import (
 
 // Workspace represents a workspace row from the workspaces table.
 type Workspace struct {
-	ID        string
-	Name      string
-	Kind      string // "personal" | "shared"
-	OwnerSub  string
-	CreatedAt time.Time
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Kind      string    `json:"kind"` // "personal" | "shared"
+	OwnerSub  string    `json:"ownerSub"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // Member represents a workspace_members row.
 type Member struct {
-	UserID  string
-	Role    string // "owner" | "member" | "viewer"
-	AddedAt time.Time
+	UserID  string    `json:"userId"`
+	Role    string    `json:"role"` // "owner" | "member" | "viewer"
+	AddedAt time.Time `json:"addedAt"`
 }
 
 // EnsurePersonal creates the personal workspace (id==sub, kind=personal) and

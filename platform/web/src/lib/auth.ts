@@ -17,7 +17,10 @@ export const oidcConfig: AuthProviderProps = {
 let _token: string | undefined;
 let _workspace: string | undefined;
 
-export const setAuthToken = (t?: string) => { _token = t; };
+export const setAuthToken = (t?: string) => {
+  _token = t;
+  if (t) window.dispatchEvent(new Event("platform:auth-ready"));
+};
 export const getAuthToken = () => _token;
 export const setActiveWorkspace = (w?: string) => { _workspace = w; };
 export const getActiveWorkspace = () => _workspace;

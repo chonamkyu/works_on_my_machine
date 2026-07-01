@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { Cog, Search } from "lucide-react";
-import { api, type Workspace } from "../lib/api";
+import { Cog, Search, ShieldCheck } from "lucide-react";
+import { api, type Workspace, type Me } from "../lib/api";
 import { setActiveWorkspace } from "../lib/auth";
 
 interface Props {
   onOpenPalette: () => void;
   onOpenSettings: () => void;
+  onOpenAdmin?: () => void;
 }
 
 const LS_KEY = "active_workspace";
@@ -29,14 +30,14 @@ function writeWsToUrl(id: string | null) {
  *   - the ⌘K affordance so first-time users discover the palette
  *   - status (activity counter) + settings (cog) on the right
  */
-export function TopBar({ onOpenPalette, onOpenSettings }: Props) {
+export function TopBar({ onOpenPalette, onOpenSettings, onOpenAdmin }: Props) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [activeWs, setActiveWsState] = useState<string | null>(
     readWsFromUrl() ?? localStorage.getItem(LS_KEY),
   );
+  const [me, setMe] = useState<Me | null>(null);
 
-  // Load workspaces on mount; set default to personal if none chosen yet.
-  useEffect(() => {
+  function loadWorkspaces() {
     api.listWorkspaces().then(({ workspaces: ws }) => {
       if (!ws?.length) return;
       setWorkspaces(ws);
@@ -52,6 +53,18 @@ export function TopBar({ onOpenPalette, onOpenSettings }: Props) {
       // /v1/workspaces may not exist in dev or if user has no workspaces;
       // silently ignore so the rest of the UI is unaffected.
     });
+  }
+
+  // Load workspaces on mount; re-fetch when auth token becomes available.
+  useEffect(() => {
+    loadWorkspaces();
+    window.addEventListener("platform:auth-ready", loadWorkspaces);
+    return () => window.removeEventListener("platform:auth-ready", loadWorkspaces);
+  }, []);
+
+  // Fetch current user to decide whether to show the Admin button.
+  useEffect(() => {
+    api.getMe().then(setMe).catch(() => { /* not logged in yet */ });
   }, []);
 
   function applyWorkspace(id: string) {
@@ -94,6 +107,17 @@ export function TopBar({ onOpenPalette, onOpenSettings }: Props) {
         <span>Search or jump…</span>
         <kbd className="font-mono text-[10px] text-ink-tertiary border border-hairline rounded px-1 py-px ml-3">⌘K</kbd>
       </button>
+      {me?.isAdmin && onOpenAdmin && (
+        <button
+          onClick={onOpenAdmin}
+          className="h-7 px-2 rounded-md hover:bg-surface-2 flex items-center gap-1.5 text-ink-subtle hover:text-ink font-mono text-[11px] border border-hairline"
+          title="Admin dashboard"
+          data-testid="open-admin"
+        >
+          <ShieldCheck className="w-3 h-3" />
+          <span>Admin</span>
+        </button>
+      )}
       <button
         onClick={onOpenSettings}
         className="h-7 w-7 rounded-md hover:bg-surface-2 flex items-center justify-center text-ink-subtle hover:text-ink"
