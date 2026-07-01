@@ -108,6 +108,24 @@ func (c *Cron) fireFor(taskID, triggerID string) func() {
 			return
 		}
 		c.dispatch.StartRun(task.WorkspaceID, task, "cron:"+triggerID)
+
+		// Record health: compute next fire time from the scheduler entry and
+		// persist. Best-effort — log on failure, never crash the scheduler.
+		key := taskID + "/" + triggerID
+		c.mu.Lock()
+		entryID, ok := c.entries[key]
+		c.mu.Unlock()
+
+		var nextFireAt *time.Time
+		if ok {
+			next := c.cron.Entry(entryID).Next
+			if !next.IsZero() {
+				nextFireAt = &next
+			}
+		}
+		if err := c.store.RecordTriggerFire(taskID, triggerID, task.WorkspaceID, nextFireAt, ""); err != nil {
+			log.Printf("cron: record trigger health for %s/%s: %v", taskID, triggerID, err)
+		}
 	}
 }
 

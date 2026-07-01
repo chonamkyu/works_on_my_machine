@@ -2405,6 +2405,21 @@ func (h *Handler) ListTaskPorts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ports": out})
 }
 
+// ListTaskTriggers returns the trigger health state for the task (last fire
+// time, next scheduled fire, last error). The task must belong to the caller's
+// workspace (ownership enforced via taskForRequest).
+func (h *Handler) ListTaskTriggers(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if _, ok := h.taskForRequest(w, r, id); !ok {
+		return
+	}
+	states := h.Store.GetTriggerState(id)
+	if states == nil {
+		states = []*store.TriggerState{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"triggerStates": states})
+}
+
 type retryTransport struct {
 	base     http.RoundTripper
 	attempts int

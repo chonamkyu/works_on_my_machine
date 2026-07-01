@@ -253,6 +253,7 @@ func main() {
 		r.Get("/tasks/{id}/dryrun", h.GetDryRun)
 		r.Post("/tasks/{id}/dryrun", h.TriggerDryRun)
 		r.Get("/tasks/{id}/ports", h.ListTaskPorts)
+		r.Get("/tasks/{id}/triggers", h.ListTaskTriggers)
 
 		r.Get("/profile", h.GetUserProfile)
 		r.Put("/profile", h.PutUserProfile)
