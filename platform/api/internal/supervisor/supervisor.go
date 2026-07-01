@@ -80,7 +80,7 @@ var errUnsupported = fmt.Errorf("supervisor: runtime not implemented yet")
 func NewClient(kind string, deps Deps) (Client, error) {
 	switch kind {
 	case "process":
-		return nil, fmt.Errorf("supervisor: runtime %q not implemented yet", kind)
+		return newProcess(deps), nil
 	case "container":
 		return nil, fmt.Errorf("supervisor: runtime %q not implemented yet", kind)
 	case "k8s":
