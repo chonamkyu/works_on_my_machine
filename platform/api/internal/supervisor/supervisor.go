@@ -79,10 +79,6 @@ type Deps struct {
 	Hook    runner.PostRunHook
 }
 
-// errUnsupported is returned by NewClient for runtime kinds that do not yet
-// have a backend implementation.
-var errUnsupported = fmt.Errorf("supervisor: runtime not implemented yet")
-
 // NewClient constructs the Client for the named runtime kind. Accepted kinds:
 //
 //   - "process"   — per-workspace Node child processes (Phase 2 of runner)
@@ -98,7 +94,7 @@ func NewClient(kind string, deps Deps) (Client, error) {
 	case "container":
 		return newContainer(deps)
 	case "k8s":
-		return nil, fmt.Errorf("supervisor: runtime %q not implemented yet", kind)
+		return newK8s(deps)
 	default:
 		return nil, fmt.Errorf("supervisor: unknown runtime kind %q", kind)
 	}

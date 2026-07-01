@@ -1,0 +1,85 @@
+# supervisor-pod.yaml — Template for the per-workspace Pod and ClusterIP Service
+# created by the k8s supervisor backend.
+#
+# Placeholders (substituted at runtime by the Go backend):
+#   {{IMAGE}}     — container image (PLATFORM_K8S_IMAGE env var, default node:22-alpine)
+#   {{WORKSPACE}} — workspace ID (e.g. "ws-abc123")
+#   {{TASK_ID}}   — task ID (e.g. "task-xyz789")
+#   {{PORT}}      — container port (default 3000)
+#
+# Actual object names are derived as: platform-ws-<workspace>-<task>
+# Namespace:                          platform-ws-<workspace>
+#
+# Deployment note: this file is documentation of the intended cluster shape.
+# ArgoCD / kustomize integration is out of scope for this task.
+# ---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: platform-ws-{{WORKSPACE}}
+  labels:
+    platform: workspace
+    platform.workspace: {{WORKSPACE}}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: platform-ws-{{WORKSPACE}}-{{TASK_ID}}
+  namespace: platform-ws-{{WORKSPACE}}
+  labels:
+    platform: workspace
+    platform.workspace: {{WORKSPACE}}
+    platform.task: {{TASK_ID}}
+spec:
+  restartPolicy: Always
+  containers:
+    - name: workflow
+      image: {{IMAGE}}
+      ports:
+        - containerPort: {{PORT}}
+          protocol: TCP
+      env:
+        - name: PLATFORM_WORKSPACE
+          value: {{WORKSPACE}}
+        - name: PLATFORM_TASK
+          value: {{TASK_ID}}
+      # Resource requests/limits are deployment-time concerns; tune per cluster.
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
+      # Liveness probe — adjust path/port to match the SDK healthcheck endpoint.
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: {{PORT}}
+        initialDelaySeconds: 10
+        periodSeconds: 15
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: {{PORT}}
+        initialDelaySeconds: 5
+        periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: platform-ws-{{WORKSPACE}}-{{TASK_ID}}
+  namespace: platform-ws-{{WORKSPACE}}
+  labels:
+    platform: workspace
+    platform.workspace: {{WORKSPACE}}
+    platform.task: {{TASK_ID}}
+spec:
+  type: ClusterIP
+  selector:
+    platform.workspace: {{WORKSPACE}}
+    platform.task: {{TASK_ID}}
+  ports:
+    - port: 80
+      targetPort: {{PORT}}
+      protocol: TCP
