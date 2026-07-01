@@ -12,14 +12,16 @@ import { MemoryView } from "./MemoryView";
 import { EvolutionView } from "./EvolutionView";
 import { DiscoverView } from "./DiscoverView";
 import { SettingsView } from "./SettingsView";
+import { SkillsView } from "./SkillsView";
 
-export type OverlayTab = "settings" | "memory" | "evolution" | "discover";
+export type OverlayTab = "settings" | "memory" | "evolution" | "discover" | "skills";
 
 const TABS: { id: OverlayTab; label: string; hint: string }[] = [
   { id: "settings", label: "Settings", hint: "⌘," },
   { id: "memory", label: "Memory", hint: "" },
   { id: "evolution", label: "Evolution", hint: "" },
   { id: "discover", label: "Discover", hint: "" },
+  { id: "skills", label: "Skills", hint: "" },
 ];
 
 interface Props {
@@ -74,6 +76,7 @@ export function SettingsOverlay({ open, tab, onTab, onClose }: Props) {
           {tab === "memory" && <MemoryView />}
           {tab === "evolution" && <EvolutionView />}
           {tab === "discover" && <DiscoverView />}
+          {tab === "skills" && <SkillsView />}
         </main>
       </div>
     </div>

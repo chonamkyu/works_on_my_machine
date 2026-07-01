@@ -149,6 +149,54 @@ export interface DiscoverHit {
   score: number;
 }
 
+// ---------------------------------------------------------------------------
+// Global Skills Registry
+// ---------------------------------------------------------------------------
+
+export interface GlobalSkill {
+  id: string;
+  name: string;
+  description: string;
+  tags: string[];
+  latestVersion: number;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GlobalSkillVersion {
+  id: string;
+  skillId: string;
+  versionNo: number;
+  frontmatter: Record<string, unknown>;
+  body: string;
+  raw: string;
+  description: string;
+  tags: string[];
+  comment: string;
+  createdBy: string;
+  createdAt: string;
+}
+
+export interface GlobalSkillAlias {
+  skillId: string;
+  alias: string;
+  versionNo: number;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export interface GlobalSkillDetail {
+  skill: GlobalSkill;
+  versions: GlobalSkillVersion[];
+  aliases: GlobalSkillAlias[];
+}
+
+export interface Me {
+  sub: string;
+  isAdmin: boolean;
+}
+
 export const api = {
   listTasks: () => http<{ tasks: Task[] }>("/v1/tasks"),
   createTask: (b: { name: string; description?: string; triggers?: Trigger[]; capabilities?: string[] }) =>
@@ -250,6 +298,36 @@ export const api = {
   listTaskPorts: (taskId: string) =>
     http<{ ports: { TaskID: string; Name: string; Role: string; Port: number }[] }>(`/v1/tasks/${taskId}/ports`),
   listWorkspaces: () => http<{ workspaces: Workspace[] }>("/v1/workspaces"),
+
+  // --- Current user ---
+  getMe: () => http<Me>("/v1/me"),
+
+  // --- Global Skills Registry (reads open; writes admin-only) ---
+  listSkills: () => http<{ skills: GlobalSkill[] | null }>("/v1/skill-repo"),
+  getSkill: (name: string) => http<GlobalSkillDetail>(`/v1/skill-repo/${encodeURIComponent(name)}`),
+  getSkillVersion: (name: string, versionNo: number) =>
+    http<GlobalSkillVersion>(`/v1/skill-repo/${encodeURIComponent(name)}/versions/${versionNo}`),
+  resolveSkill: (ref: string) =>
+    http<GlobalSkillVersion>(`/v1/skill-repo/resolve?ref=${encodeURIComponent(ref)}`),
+
+  // Admin writes
+  createSkill: (body: { name: string; description: string; tags: string[]; body: string; comment: string }) =>
+    http<GlobalSkillDetail>("/v1/skill-repo", { method: "POST", body: JSON.stringify(body) }),
+  publishSkillVersion: (
+    name: string,
+    body: { description: string; tags: string[]; body: string; comment: string },
+  ) =>
+    http<GlobalSkillVersion>(`/v1/skill-repo/${encodeURIComponent(name)}/versions`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  moveSkillAlias: (name: string, alias: string, versionNo: number) =>
+    http<GlobalSkillAlias>(`/v1/skill-repo/${encodeURIComponent(name)}/aliases`, {
+      method: "POST",
+      body: JSON.stringify({ alias, versionNo }),
+    }),
+  deleteSkill: (name: string) =>
+    http<void>(`/v1/skill-repo/${encodeURIComponent(name)}`, { method: "DELETE" }),
 };
 
 export interface Workspace {
