@@ -9,6 +9,7 @@ import { ChatPane } from "./components/ChatPane";
 import { CommandPalette } from "./components/CommandPalette";
 import { SettingsOverlay, type OverlayTab } from "./components/SettingsOverlay";
 import { UIPane, type PaneTab } from "./components/UIPane";
+import { AdminView } from "./components/AdminView";
 
 // Every meaningful piece of UI state lives in the URL so links are shareable
 // and a refresh restores the layout exactly. Booleans use "1"/missing, the
@@ -24,6 +25,8 @@ interface QueryState {
   paneTab: PaneTab | null;
   // sidebar: true means collapsed.
   sidebar: boolean;
+  // admin: true means the full-page admin dashboard is showing.
+  admin: boolean;
 }
 
 function readQuery(): QueryState {
@@ -35,6 +38,7 @@ function readQuery(): QueryState {
     pane: paneRaw === null ? true : paneRaw === "1",
     paneTab: (q.get("paneTab") as PaneTab | null) || null,
     sidebar: q.get("sidebar") === "0",
+    admin: q.get("admin") === "1",
   };
 }
 
@@ -50,6 +54,7 @@ function writeQuery(patch: Partial<QueryState>) {
   if (patch.pane !== undefined) set("pane", patch.pane ? null : "0");
   if (patch.paneTab !== undefined) set("paneTab", patch.paneTab);
   if (patch.sidebar !== undefined) set("sidebar", patch.sidebar ? "0" : null);
+  if (patch.admin !== undefined) set("admin", patch.admin ? "1" : null);
   window.history.replaceState({}, "", url.toString());
 }
 
@@ -94,6 +99,13 @@ export function App() {
     setOverlayState(t);
     writeQuery({ overlay: t });
   };
+
+  const [showAdmin, setShowAdminState] = useState(initial.admin);
+  const setShowAdmin = (v: boolean) => {
+    setShowAdminState(v);
+    writeQuery({ admin: v });
+  };
+
   const [pulses, setPulses] = useState<Record<string, number>>({});
 
   const refresh = useCallback(async () => {
@@ -172,13 +184,17 @@ export function App() {
   // 1:1 chat-per-task model. sessionId == taskId.
   const sessionId = selectedTaskId;
 
+  if (showAdmin) {
+    return <AdminPage onBack={() => setShowAdmin(false)} />;
+  }
+
   return (
     <div className="h-full flex flex-col bg-canvas text-ink">
       {!devMode && <AuthTokenSync />}
       <TopBar
         onOpenPalette={() => setPaletteOpen(true)}
         onOpenSettings={() => setOverlay("settings")}
-        onOpenAdmin={() => setOverlay("admin")}
+        onOpenAdmin={() => setShowAdmin(true)}
       />
       <div className="flex-1 flex min-h-0">
         <Sidebar
@@ -248,6 +264,7 @@ export function App() {
           setSelectedTaskId(t.id);
         }}
         onOpenView={(v) => setOverlay(v)}
+        onOpenAdmin={() => setShowAdmin(true)}
       />
 
       <SettingsOverlay
@@ -315,6 +332,33 @@ export function AuthGate({ children }: { children: ReactNode }) {
   if (auth.isLoading || auth.activeNavigator) return <AuthSplash text="Signing in…" />;
   if (!auth.isAuthenticated) return <AuthSplash text="Redirecting to sign-in…" />;
   return <>{children}</>;
+}
+
+/** Full-screen admin dashboard. Rendered instead of the normal app layout when
+ *  the admin URL param is set. AdminView handles its own /v1/me gate internally. */
+function AdminPage({ onBack }: { onBack: () => void }) {
+  return (
+    <div className="h-full flex flex-col bg-canvas text-ink">
+      <header className="h-11 border-b border-hairline bg-canvas flex items-center px-4 gap-3 flex-shrink-0">
+        <span className="font-mono text-[11px] tracking-[0.14em] text-ink-subtle select-none">
+          works_on_my_machine
+        </span>
+        <span className="font-mono text-[11px] text-ink-tertiary select-none">/</span>
+        <span className="font-mono text-[11px] text-ink select-none">Admin Dashboard</span>
+        <div className="flex-1" />
+        <button
+          onClick={onBack}
+          className="h-7 px-3 rounded-md border border-hairline bg-surface-1 hover:border-hairline-strong text-[12px] font-mono text-ink-subtle hover:text-ink flex items-center gap-1.5"
+        >
+          <span>←</span>
+          <span>Back</span>
+        </button>
+      </header>
+      <div className="flex-1 min-h-0 overflow-hidden">
+        <AdminView />
+      </div>
+    </div>
+  );
 }
 
 function EmptyChat({ onNewTask }: { onNewTask: () => Promise<void> }) {

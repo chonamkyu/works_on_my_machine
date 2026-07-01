@@ -7,14 +7,14 @@ import (
 
 // User represents a platform user row from the users table.
 type User struct {
-	Sub               string
-	Email             string
-	PreferredUsername string
-	DisplayName       string
-	IsAdmin           bool
-	Disabled          bool
-	CreatedAt         time.Time
-	LastSeenAt        time.Time
+	Sub               string    `json:"sub"`
+	Email             string    `json:"email"`
+	PreferredUsername string    `json:"preferredUsername"`
+	DisplayName       string    `json:"displayName"`
+	IsAdmin           bool      `json:"isAdmin"`
+	Disabled          bool      `json:"disabled"`
+	CreatedAt         time.Time `json:"createdAt"`
+	LastSeenAt        time.Time `json:"lastSeenAt"`
 }
 
 // UpsertUserOnLogin inserts or updates a user record on login.

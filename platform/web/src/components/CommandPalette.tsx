@@ -25,10 +25,11 @@ interface Props {
   tasks: Task[];
   onSelectTask: (id: string) => void;
   onNewTask: () => Promise<void>;
-  onOpenView: (view: "memory" | "evolution" | "discover" | "settings" | "skills" | "mcp" | "admin") => void;
+  onOpenView: (view: "memory" | "evolution" | "discover" | "settings" | "skills" | "mcp") => void;
+  onOpenAdmin?: () => void;
 }
 
-export function CommandPalette({ open, onClose, tasks, onSelectTask, onNewTask, onOpenView }: Props) {
+export function CommandPalette({ open, onClose, tasks, onSelectTask, onNewTask, onOpenView, onOpenAdmin }: Props) {
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -60,7 +61,7 @@ export function CommandPalette({ open, onClose, tasks, onSelectTask, onNewTask, 
       { id: "nav:skills", label: "Skills registry", group: "navigate", onSelect: () => { onOpenView("skills"); onClose(); } },
       { id: "nav:mcp", label: "MCP servers", group: "navigate", onSelect: () => { onOpenView("mcp"); onClose(); } },
       { id: "nav:settings", label: "Settings", hint: "⌘,", group: "navigate", onSelect: () => { onOpenView("settings"); onClose(); } },
-      { id: "nav:admin", label: "Admin dashboard", group: "navigate", onSelect: () => { onOpenView("admin"); onClose(); } },
+      { id: "nav:admin", label: "Admin dashboard", group: "navigate", onSelect: () => { onOpenAdmin?.(); onClose(); } },
     ];
     const direct: Action[] = [
       {
@@ -75,7 +76,7 @@ export function CommandPalette({ open, onClose, tasks, onSelectTask, onNewTask, 
       },
     ];
     return [...direct, ...taskActions, ...navActions];
-  }, [tasks, onSelectTask, onNewTask, onOpenView, onClose]);
+  }, [tasks, onSelectTask, onNewTask, onOpenView, onOpenAdmin, onClose]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
