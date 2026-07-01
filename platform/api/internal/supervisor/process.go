@@ -5,6 +5,18 @@ import (
 	"github.com/nk/platform/api/internal/store"
 )
 
+// memStore extracts the concrete *store.Memory from a StoreClient interface,
+// or returns nil when the value is nil or not a *store.Memory. The process
+// backend delegates directly to the runner constructors which require the
+// concrete type; callers that pass in a test fake will get a nil store.
+func memStore(s StoreClient) *store.Memory {
+	if s == nil {
+		return nil
+	}
+	m, _ := s.(*store.Memory)
+	return m
+}
+
 // Process is the "process" runtime backend: it spawns workflow tasks as
 // Node.js child processes on the local machine, one process per run/service.
 // Per-workspace isolation is achieved by the WorkflowFS path layout:
@@ -24,9 +36,10 @@ type Process struct {
 // NodeRunner and a ServiceManager internally so that the caller does not need
 // to wire them separately.
 func newProcess(deps Deps) *Process {
-	mock := runner.NewMock(deps.Store, deps.Bus)
+	mem := memStore(deps.Store)
+	mock := runner.NewMock(mem, deps.Bus)
 	node := runner.NewNode(
-		deps.Store,
+		mem,
 		deps.Bus,
 		deps.Files,
 		deps.SDKPath,
@@ -35,8 +48,8 @@ func newProcess(deps Deps) *Process {
 		deps.Ports,
 	)
 	var svcMgr *runner.ServiceManager
-	if deps.Store != nil && deps.Bus != nil {
-		svcMgr = runner.NewServiceManager(deps.Store, node, deps.Bus, deps.Hook, deps.Ports)
+	if mem != nil && deps.Bus != nil {
+		svcMgr = runner.NewServiceManager(mem, node, deps.Bus, deps.Hook, deps.Ports)
 	}
 	dispatch := runner.NewDispatcher(deps.Files, node, mock)
 	return &Process{
@@ -130,5 +143,13 @@ func (p *Process) BootServices() error {
 	if p.services != nil {
 		p.services.Start()
 	}
+	return nil
+}
+
+// ReapIdle is a no-op for the process backend. Node child processes are
+// always-resident components of the API server; there is no per-workspace
+// infrastructure to tear down. The process backend relies on the OS to
+// reclaim resources when individual run processes exit.
+func (p *Process) ReapIdle() error {
 	return nil
 }

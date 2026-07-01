@@ -46,6 +46,7 @@ func (f *fakeProxySupervisor) Health(ws string) supervisor.Status          { ret
 func (f *fakeProxySupervisor) ServiceRunning(ws, taskID string) bool       { return false }
 func (f *fakeProxySupervisor) RestartService(ws, taskID string) error      { return nil }
 func (f *fakeProxySupervisor) BootServices() error                         { return nil }
+func (f *fakeProxySupervisor) ReapIdle() error                             { return nil }
 
 // upstreamPort parses the port from a "host:port" listener address string.
 func upstreamPort(addr string) (int, error) {

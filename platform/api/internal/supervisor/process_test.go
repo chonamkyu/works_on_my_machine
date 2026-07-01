@@ -145,3 +145,25 @@ func TestHealthAlwaysUp(t *testing.T) {
 		t.Errorf("Health(\"wsA\") = Up:%v, want Up:true", status.Up)
 	}
 }
+
+// TestProcessReapIdleNoOp verifies that ReapIdle on the process backend is a
+// no-op: it returns nil and does not affect any workspace state.
+func TestProcessReapIdleNoOp(t *testing.T) {
+	root := t.TempDir()
+	deps := buildDeps(t, root)
+
+	c, err := supervisor.NewClient("process", deps)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	if err := c.ReapIdle(); err != nil {
+		t.Errorf("ReapIdle on process backend should return nil, got: %v", err)
+	}
+
+	// Health must still report Up after a reap (no-op means nothing changed).
+	status := c.Health("any-workspace")
+	if !status.Up {
+		t.Errorf("Health after ReapIdle = Up:%v, want Up:true", status.Up)
+	}
+}

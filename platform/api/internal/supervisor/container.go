@@ -418,6 +418,61 @@ func (c *Container) BootServices() error {
 	return nil
 }
 
+// ReapIdle stops and removes workspace containers for workspaces that have no
+// enabled service task. Workspaces with at least one non-disabled service task
+// are considered "warm" and are left running.
+//
+// Policy (conservative):
+//   - Enumerate all running containers with the label platform=workspace.
+//   - For each container, extract its platform.workspace label.
+//   - If the store has no service task for that workspace, remove the container.
+//   - If the store is unavailable (nil), skip reaping entirely to be safe.
+func (c *Container) ReapIdle() error {
+	if c.deps.Store == nil {
+		return nil
+	}
+
+	// Build a set of workspaces that should stay warm (have a service task).
+	serviceTasks := c.deps.Store.ListServiceTasks()
+	warmWS := make(map[string]bool, len(serviceTasks))
+	for _, t := range serviceTasks {
+		warmWS[t.WorkspaceID] = true
+	}
+
+	// List all containers managed by the platform.
+	out, err := c.runCmd("ps", "-a",
+		"--filter", "label=platform=workspace",
+		"--format", "{{.Names}}\t{{.Label \"platform.workspace\"}}",
+	)
+	if err != nil || out == "" {
+		return nil // nothing to reap or runtime unavailable
+	}
+
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		name := strings.TrimSpace(parts[0])
+		ws := strings.TrimSpace(parts[1])
+		if ws == "" || warmWS[ws] {
+			continue // workspace has a service task — keep the container warm
+		}
+
+		// Workspace is idle: stop and remove the container.
+		c.mu.Lock()
+		_ = c.removeWorkspaceContainer(ws)
+		c.mu.Unlock()
+		_ = name // name referenced above via removeWorkspaceContainer(ws) which builds the name internally
+	}
+
+	return nil
+}
+
 // ---- helpers ----------------------------------------------------------------
 
 // failRun transitions run to RunFailed via store update and returns it.

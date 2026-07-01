@@ -50,6 +50,8 @@ func (f *fakeSupervisor) RestartService(ws, taskID string) error { return nil }
 
 func (f *fakeSupervisor) BootServices() error { return nil }
 
+func (f *fakeSupervisor) ReapIdle() error { return nil }
+
 // TestSupervisorRoutingTriggerRun creates a task in workspace "wsX",
 // POSTs /tasks/{id}/runs, and asserts that the fake supervisor received
 // ws == "wsX".

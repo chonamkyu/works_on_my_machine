@@ -245,3 +245,95 @@ func TestK8sNewClientFactory(t *testing.T) {
 		t.Logf("NewClient(\"k8s\") returned expected config error (no kubeconfig): %v", err)
 	}
 }
+
+// TestK8sReapIdle_RemovesIdleWorkspacePods verifies that ReapIdle deletes pods
+// for workspaces that have no service task, while preserving pods for
+// workspaces that have an active service task.
+func TestK8sReapIdle_RemovesIdleWorkspacePods(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+
+	// wsWarm has an active service task — its pods must not be reaped.
+	wsWarm := "warm-ws"
+	taskWarm := svcTask(wsWarm, "task-warm")
+
+	// wsIdle has no service task — its pods must be reaped.
+	wsIdle := "idle-ws"
+	taskIdle := svcTask(wsIdle, "task-idle")
+	taskIdle.Kind = "oneshot" // not a service task
+
+	// Build a store that returns taskWarm as the only service task.
+	// We use a minimal fake store wrapper to satisfy the interface.
+	fakeStore := &fakeServiceStore{tasks: []*store.Task{taskWarm}}
+
+	deps := supervisor.Deps{Store: fakeStore}
+	k := supervisor.NewK8sWithClientForTest(cs, deps)
+
+	// Provision both workspaces by calling EnsureService (which creates namespace + pod).
+	if err := k.EnsureService(wsWarm, taskWarm); err != nil {
+		t.Fatalf("EnsureService warm: %v", err)
+	}
+	// For the idle workspace we create the namespace + pod via EnsureService
+	// (using the idle task's kind — ReapIdle doesn't care about what created them,
+	// only about the store's current service task list).
+	idleK := supervisor.NewK8sWithClientForTest(cs, supervisor.Deps{})
+	if err := idleK.EnsureService(wsIdle, taskIdle); err != nil {
+		t.Fatalf("EnsureService idle: %v", err)
+	}
+
+	// Confirm both workspaces have pods before reaping.
+	nsWarm := "platform-ws-" + wsWarm
+	nsIdle := "platform-ws-" + wsIdle
+
+	warmPodsBefore, _ := cs.CoreV1().Pods(nsWarm).List(t.Context(), metav1.ListOptions{})
+	idlePodsBefore, _ := cs.CoreV1().Pods(nsIdle).List(t.Context(), metav1.ListOptions{})
+	if len(warmPodsBefore.Items) == 0 {
+		t.Fatal("warm workspace has no pods before reap")
+	}
+	if len(idlePodsBefore.Items) == 0 {
+		t.Fatal("idle workspace has no pods before reap")
+	}
+
+	// Run the reaper.
+	if err := k.ReapIdle(); err != nil {
+		t.Fatalf("ReapIdle: %v", err)
+	}
+
+	// Warm workspace pods must still exist.
+	warmPodsAfter, _ := cs.CoreV1().Pods(nsWarm).List(t.Context(), metav1.ListOptions{})
+	if len(warmPodsAfter.Items) == 0 {
+		t.Error("ReapIdle removed pods from warm workspace — it should have been preserved")
+	}
+
+	// Idle workspace pods must be gone.
+	idlePodsAfter, _ := cs.CoreV1().Pods(nsIdle).List(t.Context(), metav1.ListOptions{})
+	if len(idlePodsAfter.Items) != 0 {
+		t.Errorf("ReapIdle left %d pod(s) in idle workspace; expected 0", len(idlePodsAfter.Items))
+	}
+}
+
+// TestK8sReapIdle_NilStore is a no-op safety check: ReapIdle with a nil store
+// must return nil without panicking.
+func TestK8sReapIdle_NilStore(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	deps := supervisor.Deps{Store: nil}
+	k := supervisor.NewK8sWithClientForTest(cs, deps)
+
+	if err := k.ReapIdle(); err != nil {
+		t.Errorf("ReapIdle with nil store should return nil, got: %v", err)
+	}
+}
+
+// fakeServiceStore is a minimal supervisor.StoreClient substitute used in
+// tests to control which service tasks are returned by ListServiceTasks.
+// Only the methods needed by ReapIdle are meaningful; the others are no-ops.
+type fakeServiceStore struct {
+	tasks []*store.Task
+}
+
+func (f *fakeServiceStore) ListServiceTasks() []*store.Task { return f.tasks }
+
+func (f *fakeServiceStore) CreateRun(_, _ string) *store.Run { return &store.Run{} }
+
+func (f *fakeServiceStore) UpdateRun(_ string, _ func(*store.Run)) (*store.Run, error) {
+	return &store.Run{}, nil
+}

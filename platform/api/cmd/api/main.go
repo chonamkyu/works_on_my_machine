@@ -202,6 +202,32 @@ func main() {
 		log.Printf("supervisor boot: %v", err)
 	}
 
+	// Idle reaper: periodically stop workspace runtimes that have no active
+	// service task. The process backend's ReapIdle is a no-op so this goroutine
+	// is safe to start regardless of the configured runtime.
+	reapTick := 5 * time.Minute
+	if v := envOr("PLATFORM_IDLE_REAP_TICK", ""); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			reapTick = d
+		}
+	}
+	reapStop := make(chan struct{})
+	go func() {
+		t := time.NewTicker(reapTick)
+		defer t.Stop()
+		for {
+			select {
+			case <-reapStop:
+				return
+			case <-t.C:
+				if err := sup.ReapIdle(); err != nil {
+					log.Printf("idle reaper: %v", err)
+				}
+			}
+		}
+	}()
+	defer close(reapStop)
+
 	sched := scheduler.NewCron(taskStore, sup)
 	sched.Start()
 	stopCron := make(chan struct{})

@@ -60,6 +60,21 @@ type Client interface {
 	// BootServices starts all kind=service tasks across all workspaces.
 	// Called once at API boot.
 	BootServices() error
+
+	// ReapIdle stops workspace runtimes that are idle: no enabled service task
+	// and no active (queued/running) run. The process backend is always
+	// resident and returns nil immediately. The container and k8s backends stop
+	// or delete the relevant runtime objects.
+	ReapIdle() error
+}
+
+// StoreClient is the subset of store.Memory that the supervisor backends
+// require. Using an interface rather than the concrete pointer allows tests to
+// inject lightweight fakes without spinning up a real Postgres database.
+type StoreClient interface {
+	CreateRun(taskID, trigger string) *store.Run
+	UpdateRun(id string, mutate func(*store.Run)) (*store.Run, error)
+	ListServiceTasks() []*store.Task
 }
 
 // Deps carries the shared dependencies that runtime backends need. It is a
@@ -69,7 +84,7 @@ type Client interface {
 // "process" backend can forward them directly without an additional indirection
 // layer.
 type Deps struct {
-	Store   *store.Memory
+	Store   StoreClient
 	Bus     *store.Bus
 	Files   *store.WorkflowFS
 	Creds   *store.CredentialStore

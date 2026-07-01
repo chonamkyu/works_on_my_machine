@@ -369,3 +369,55 @@ func (k *K8s) BootServices() error {
 	return nil
 }
 
+// ReapIdle deletes pods for workspaces that have no enabled service task.
+// Workspaces with at least one non-disabled service task are considered
+// "warm" and their pods are left intact.
+//
+// Policy (conservative):
+//   - Build a warm-workspace set from store.ListServiceTasks().
+//   - List all namespaces with the label platform=workspace.
+//   - For each namespace whose workspace is NOT in the warm set, delete all
+//     pods in that namespace (scale-to-zero). Services are left; they can
+//     be restarted by EnsureService on next use.
+func (k *K8s) ReapIdle() error {
+	if k.deps.Store == nil {
+		return nil
+	}
+
+	// Build a set of workspaces that should stay warm.
+	serviceTasks := k.deps.Store.ListServiceTasks()
+	warmWS := make(map[string]bool, len(serviceTasks))
+	for _, t := range serviceTasks {
+		warmWS[t.WorkspaceID] = true
+	}
+
+	ctx := context.Background()
+
+	// List all platform-managed namespaces.
+	nsList, err := k.cs.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
+		LabelSelector: k8sPlatformLabel + "=workspace",
+	})
+	if err != nil {
+		return fmt.Errorf("supervisor/k8s: reap idle — list namespaces: %w", err)
+	}
+
+	for i := range nsList.Items {
+		ns := &nsList.Items[i]
+		ws := ns.Labels[k8sWorkspaceLabel]
+		if ws == "" || warmWS[ws] {
+			continue // workspace has a service task — keep pods alive
+		}
+
+		// Idle workspace: delete all pods in the namespace.
+		pods, err := k.cs.CoreV1().Pods(ns.Name).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			continue
+		}
+		for _, pod := range pods.Items {
+			_ = k.cs.CoreV1().Pods(ns.Name).Delete(ctx, pod.Name, metav1.DeleteOptions{})
+		}
+	}
+
+	return nil
+}
+
