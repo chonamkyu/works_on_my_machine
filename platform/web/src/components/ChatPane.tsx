@@ -48,7 +48,10 @@ export function ChatPane({
   const [startedAt, setStartedAt] = useState<number | null>(() => getGeneration(sessionId)?.startedAt ?? null);
   const [now, setNow] = useState<number>(() => Date.now());
   const scrollRef = useRef<HTMLDivElement>(null);
-  const restoredFromStore = useRef(false);
+  // Mark restore as done if we're not resuming an in-progress generation
+  // on mount. If pending is true, we need one sync from the store before
+  // the live SSE takes over; if pending is false there's nothing to restore.
+  const restoredFromStore = useRef<boolean>(!(getGeneration(sessionId)?.generating ?? false));
 
   const genEntry = useGeneration(sessionId);
   // On first mount with an in-progress generation, restore the accumulated
@@ -56,11 +59,11 @@ export function ChatPane({
   // single source of truth for streamPreview — we don't re-sync on every
   // store update to avoid duplicate deltas.
   useEffect(() => {
-    if (!restoredFromStore.current && pending && genEntry?.preview) {
+    if (!restoredFromStore.current && genEntry?.preview !== undefined) {
       restoredFromStore.current = true;
       setStreamPreview(genEntry.preview);
     }
-  }, [genEntry?.preview, pending]);
+  }, [genEntry?.preview]);
 
   // Tick a clock while a turn is in flight so the user can see elapsed time.
   useEffect(() => {
