@@ -122,3 +122,73 @@ func TestWorkspace_PersonalAndShared(t *testing.T) {
 		t.Fatal("non-owner should not remove another member")
 	}
 }
+
+func TestWorkspace_DeleteWorkspace(t *testing.T) {
+	if os.Getenv("PLATFORM_DB_URL") == "" {
+		t.Skip("no db")
+	}
+	m := newTestMemory(t)
+	ctx := context.Background()
+
+	// Create two users: del_u1 (owner) and del_u2 (non-owner).
+	for _, sub := range []string{"del_u1", "del_u2", "del_adm"} {
+		if err := m.UpsertUserOnLogin(sub, sub+"@x", sub); err != nil {
+			t.Fatalf("upsert %s: %v", sub, err)
+		}
+	}
+
+	t.Cleanup(func() {
+		_, _ = m.pool.Exec(ctx, "DELETE FROM workspaces WHERE owner_sub IN ('del_u1','del_u2','del_adm')")
+		_, _ = m.pool.Exec(ctx, "DELETE FROM users WHERE sub IN ('del_u1','del_u2','del_adm')")
+	})
+
+	// EnsurePersonal for del_u1.
+	if err := m.EnsurePersonal("del_u1", "Del U1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Refusing to delete a personal workspace.
+	err := m.DeleteWorkspace("del_u1", "del_u1", false)
+	if err == nil {
+		t.Fatal("expected error deleting personal workspace, got nil")
+	}
+	if err.Error() != "cannot delete personal workspace" {
+		t.Fatalf("wrong error: %v", err)
+	}
+
+	// Non-owner cannot delete a shared workspace.
+	ws, err := m.CreateWorkspace("del_u1", "To Delete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = m.DeleteWorkspace(ws.ID, "del_u2", false)
+	if err == nil {
+		t.Fatal("expected error for non-owner delete, got nil")
+	}
+	if err.Error() != "only the owner can delete a workspace" {
+		t.Fatalf("wrong error: %v", err)
+	}
+
+	// Owner can delete a shared workspace.
+	ws2, err := m.CreateWorkspace("del_u1", "Owner Deletes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DeleteWorkspace(ws2.ID, "del_u1", false); err != nil {
+		t.Fatalf("owner delete: %v", err)
+	}
+	// Confirm it is gone (should return not-found error).
+	err = m.DeleteWorkspace(ws2.ID, "del_u1", false)
+	if err == nil {
+		t.Fatal("expected not-found error after deletion, got nil")
+	}
+
+	// Admin can delete a workspace they don't own.
+	ws3, err := m.CreateWorkspace("del_u1", "Admin Deletes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DeleteWorkspace(ws3.ID, "del_adm", true); err != nil {
+		t.Fatalf("admin delete: %v", err)
+	}
+}
