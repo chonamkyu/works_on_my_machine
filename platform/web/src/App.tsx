@@ -10,6 +10,7 @@ import { CommandPalette } from "./components/CommandPalette";
 import { SettingsOverlay, type OverlayTab } from "./components/SettingsOverlay";
 import { UIPane, type PaneTab } from "./components/UIPane";
 import { AdminView } from "./components/AdminView";
+import { appendPreview, clearGeneration } from "./lib/generation";
 
 // Every meaningful piece of UI state lives in the URL so links are shareable
 // and a refresh restores the layout exactly. Booleans use "1"/missing, the
@@ -131,7 +132,23 @@ export function App() {
         msg.channel.startsWith("task:updated:") ||
         msg.channel.startsWith("run:state:")
       ) {
+        // Anti-stuck: clear any in-flight generation for this task when a
+        // terminal task/run event arrives. The task id is the first segment
+        // after the prefix (e.g. "task:updated:<taskId>" or "run:state:<taskId>:...").
+        const parts = msg.channel.split(":");
+        const taskId = parts[2];
+        if (taskId) clearGeneration(taskId);
         refresh().catch(console.error);
+      }
+      // Accumulate stream deltas into the generation store so ChatPane can
+      // restore the in-progress view even after being unmounted.
+      if (msg.channel.startsWith("chat:progress:")) {
+        const sessionId = msg.channel.slice("chat:progress:".length);
+        const payload = msg.payload as { channel?: string; data?: unknown };
+        const inner = payload?.data as { delta?: string } | undefined;
+        if (payload.channel === "workflow:stream_delta" && typeof inner?.delta === "string") {
+          appendPreview(sessionId, inner.delta);
+        }
       }
     });
     return stop;
