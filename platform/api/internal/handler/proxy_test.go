@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -243,5 +244,146 @@ func TestProxyUnregisteredPortNameGets404(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("unregistered port name: want 404, got %d body=%q", rr.Code, rr.Body.String())
+	}
+}
+
+// TestProxyNoCookieNonDevGets403 verifies that a request with NO identity
+// (no Bearer, no access_token, no platform_proxy cookie) is rejected 403 in
+// non-dev mode rather than passing through.
+func TestProxyNoCookieNonDevGets403(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	port, err := upstreamPort(upstream.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sup := &fakeProxySupervisor{
+		endpointBase:  "http://127.0.0.1",
+		endpointPorts: map[string]int{"ui": port},
+		endpointOK:    true,
+	}
+	r, s := buildProxyRouter(t, sup)
+
+	ownerSub := "owner-" + randSuffix()
+	if err := s.UpsertUserOnLogin(ownerSub, ownerSub+"@example.com", ownerSub); err != nil {
+		t.Fatalf("UpsertUserOnLogin: %v", err)
+	}
+	if err := s.EnsurePersonal(ownerSub, ownerSub); err != nil {
+		t.Fatalf("EnsurePersonal: %v", err)
+	}
+	ws, err := s.CreateWorkspace(ownerSub, "ws-nocookie-"+randSuffix())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	wsA := ws.ID
+
+	task := s.CreateTask(&store.Task{
+		UserID:      ownerSub,
+		WorkspaceID: wsA,
+		Name:        "proxy-test-nocookie",
+		Kind:        "service",
+	})
+
+	// No claims injected — simulates a cookie-less browser request in prod.
+	req := httptest.NewRequest(http.MethodGet, "/w/"+wsA+"/d/"+task.ID+"/", nil)
+
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("no-cookie non-dev: want 403, got %d body=%q", rr.Code, rr.Body.String())
+	}
+}
+
+// TestProxyCookieMemberGets200 verifies that a valid platform_proxy cookie
+// for a workspace member is accepted (200 from upstream).
+func TestProxyCookieMemberGets200(t *testing.T) {
+	auth.SetProxySecret("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	port, err := upstreamPort(upstream.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sup := &fakeProxySupervisor{
+		endpointBase:  "http://127.0.0.1",
+		endpointPorts: map[string]int{"ui": port},
+		endpointOK:    true,
+	}
+
+	// Build a router that runs through the full Optional + Workspace middleware
+	// so the cookie is resolved to claims before reaching the handler.
+	s := openTestDB(t)
+	auth.SetAdminEnv("")
+	auth.SetAdminChecker(s)
+	sup.store = s
+
+	h := handler.New(s, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	h.Sup = sup
+
+	authMW := auth.New(false) // non-dev
+
+	chiR := chi.NewRouter()
+	chiR.Group(func(r chi.Router) {
+		r.Use(authMW.Optional)
+		r.Use(func(next http.Handler) http.Handler { return authMW.Workspace(s)(next) })
+		r.HandleFunc("/w/{ws}/d/{taskId}/*", h.ServeWorkspaceDashboard)
+	})
+
+	ownerSub := "owner-" + randSuffix()
+	memberSub := "member-cookie-" + randSuffix()
+
+	if err := s.UpsertUserOnLogin(ownerSub, ownerSub+"@example.com", ownerSub); err != nil {
+		t.Fatalf("UpsertUserOnLogin owner: %v", err)
+	}
+	if err := s.EnsurePersonal(ownerSub, ownerSub); err != nil {
+		t.Fatalf("EnsurePersonal owner: %v", err)
+	}
+	ws, err := s.CreateWorkspace(ownerSub, "ws-cookie-member-"+randSuffix())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	wsA := ws.ID
+
+	if err := s.UpsertUserOnLogin(memberSub, memberSub+"@example.com", memberSub); err != nil {
+		t.Fatalf("UpsertUserOnLogin member: %v", err)
+	}
+	if err := s.EnsurePersonal(memberSub, memberSub); err != nil {
+		t.Fatalf("EnsurePersonal member: %v", err)
+	}
+	if err := s.InviteMember(wsA, ownerSub, memberSub, "member"); err != nil {
+		t.Fatalf("InviteMember: %v", err)
+	}
+
+	task := s.CreateTask(&store.Task{
+		UserID:      ownerSub,
+		WorkspaceID: wsA,
+		Name:        "proxy-test-cookie-member",
+		Kind:        "service",
+	})
+
+	// Mint a proxy token for the member.
+	tok, err := auth.MintProxyToken(memberSub, 10*time.Minute)
+	if err != nil {
+		t.Fatalf("MintProxyToken: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/w/"+wsA+"/d/"+task.ID+"/", nil)
+	req.AddCookie(&http.Cookie{Name: "platform_proxy", Value: tok})
+
+	rr := httptest.NewRecorder()
+	chiR.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("cookie-member proxy: want 200, got %d body=%q", rr.Code, rr.Body.String())
 	}
 }

@@ -2172,18 +2172,20 @@ func (h *Handler) ForkTask(w http.ResponseWriter, r *http.Request) {
 // --- dashboards -------------------------------------------------------
 
 // checkWorkspaceMembership enforces that the caller is a member of the given
-// workspace. Returns true (authorized) in three cases:
-//  1. No identity in the context (unauthenticated — iframes in dev can't set headers).
-//  2. The caller is a platform admin.
-//  3. The caller is an explicit member of workspaceID.
+// workspace. Returns true (authorized) in two cases:
+//  1. The caller is a platform admin.
+//  2. The caller is an explicit member of workspaceID.
 //
-// Returns false and writes a 403 when claims ARE present but the membership
-// check fails.
+// Returns false and writes a 403 in all other cases, including when no identity
+// is present in the context. In dev mode the Optional middleware always injects
+// devClaims, so nil claims here means a prod request with no credential → reject.
 func (h *Handler) checkWorkspaceMembership(w http.ResponseWriter, r *http.Request, workspaceID string) bool {
 	claims := auth.ClaimsFromCtx(r.Context())
 	if claims == nil {
-		// Unauthenticated — allow through (iframes cannot set Authorization headers).
-		return true
+		// No identity present. In dev mode the middleware always injects claims,
+		// so nil here means a prod request with no cookie/token → reject.
+		http.Error(w, "forbidden: authentication required for dashboard proxy", http.StatusForbidden)
+		return false
 	}
 	if auth.IsAdmin(r.Context()) {
 		return true
