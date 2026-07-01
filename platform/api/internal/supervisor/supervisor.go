@@ -13,6 +13,7 @@ import (
 	"fmt"
 
 	"github.com/nk/platform/api/internal/portreg"
+	"github.com/nk/platform/api/internal/runner"
 	"github.com/nk/platform/api/internal/store"
 )
 
@@ -75,6 +76,7 @@ type Deps struct {
 	Ports   *portreg.Registry
 	SDKPath string // absolute path to the built @platform/sdk directory
 	Node    string // node binary path; empty means "node" on $PATH
+	Hook    runner.PostRunHook
 }
 
 // errUnsupported is returned by NewClient for runtime kinds that do not yet

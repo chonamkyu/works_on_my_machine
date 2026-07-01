@@ -16,6 +16,7 @@ import (
 type Process struct {
 	node     *runner.NodeRunner
 	services *runner.ServiceManager
+	dispatch *runner.Dispatcher
 	deps     Deps
 }
 
@@ -23,22 +24,25 @@ type Process struct {
 // NodeRunner and a ServiceManager internally so that the caller does not need
 // to wire them separately.
 func newProcess(deps Deps) *Process {
+	mock := runner.NewMock(deps.Store, deps.Bus)
 	node := runner.NewNode(
 		deps.Store,
 		deps.Bus,
 		deps.Files,
 		deps.SDKPath,
-		nil, // PostRunHook — not wired at this layer; handlers attach their own
+		deps.Hook,
 		deps.Creds,
 		deps.Ports,
 	)
 	var svcMgr *runner.ServiceManager
 	if deps.Store != nil && deps.Bus != nil {
-		svcMgr = runner.NewServiceManager(deps.Store, node, deps.Bus, nil, deps.Ports)
+		svcMgr = runner.NewServiceManager(deps.Store, node, deps.Bus, deps.Hook, deps.Ports)
 	}
+	dispatch := runner.NewDispatcher(deps.Files, node, mock)
 	return &Process{
 		node:     node,
 		services: svcMgr,
+		dispatch: dispatch,
 		deps:     deps,
 	}
 }
@@ -47,13 +51,13 @@ func newProcess(deps Deps) *Process {
 // task.WorkspaceID; ws is a redundant cross-check that callers can omit if
 // they trust the task object.
 func (p *Process) StartRun(ws string, task *store.Task, trigger string) *store.Run {
-	return p.node.Start(task, trigger)
+	return p.dispatch.Start(task, trigger)
 }
 
 // CancelRun signals cancellation of the named run. Returns true if a cancel
 // handle was found and fired.
 func (p *Process) CancelRun(ws, runID string) bool {
-	return p.node.Cancel(runID)
+	return p.dispatch.Cancel(runID)
 }
 
 // StopService tears down the long-running service daemon for taskID.

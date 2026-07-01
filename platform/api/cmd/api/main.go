@@ -192,6 +192,7 @@ func main() {
 		Ports:   ports,
 		SDKPath: sdkPath,
 		Node:    "",
+		Hook:    hook,
 	})
 	if err != nil {
 		log.Fatalf("supervisor: %v", err)
