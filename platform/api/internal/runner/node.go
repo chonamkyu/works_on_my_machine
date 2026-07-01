@@ -145,7 +145,7 @@ func (r *NodeRunner) RunDry(parent context.Context, task *store.Task, budget tim
 	start := time.Now()
 	defer func() { res.DurationMs = int(time.Since(start).Milliseconds()) }()
 
-	dir := r.files.Dir(task.ID)
+	dir := r.files.Dir(task.WorkspaceID, task.ID)
 	if _, err := os.Stat(filepath.Join(dir, "main.ts")); err != nil {
 		res.FatalError = fmt.Sprintf("no main.ts: %v", err)
 		return res
@@ -289,7 +289,7 @@ func pickFreePortLocal() (int, error) {
 }
 
 func (r *NodeRunner) execute(ctx context.Context, task *store.Task, run *store.Run) {
-	dir := r.files.Dir(task.ID)
+	dir := r.files.Dir(task.WorkspaceID, task.ID)
 	if _, err := os.Stat(filepath.Join(dir, "main.ts")); err != nil {
 		r.fail(task, run, fmt.Sprintf("no main.ts: %v", err))
 		return

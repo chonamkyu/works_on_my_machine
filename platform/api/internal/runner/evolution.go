@@ -121,8 +121,8 @@ func (e *EvolutionEngine) propose(task *store.Task, refs []reflection.Result, re
 		return
 	}
 
-	mainTs, _ := e.files.ReadFile(task.ID, "main.ts")
-	yaml, _ := e.files.ReadFile(task.ID, "workflow.yaml")
+	mainTs, _ := e.files.ReadFile(task.WorkspaceID, task.ID, "main.ts")
+	yaml, _ := e.files.ReadFile(task.WorkspaceID, task.ID, "workflow.yaml")
 	if mainTs == "" {
 		return
 	}
@@ -193,5 +193,5 @@ func (e *EvolutionEngine) ApplyAccepted(pr *store.EvolutionPR) error {
 	if len(patch) == 0 {
 		return nil
 	}
-	return e.files.WriteFiles(pr.TaskID, patch)
+	return e.files.WriteFiles(pr.WorkspaceID, pr.TaskID, patch)
 }

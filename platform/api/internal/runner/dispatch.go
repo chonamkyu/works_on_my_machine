@@ -19,20 +19,20 @@ func NewDispatcher(files *store.WorkflowFS, node *NodeRunner, mock *MockRunner) 
 	return &Dispatcher{files: files, node: node, mock: mock}
 }
 
-func (d *Dispatcher) hasCode(taskID string) bool {
-	_, err := os.Stat(filepath.Join(d.files.Dir(taskID), "main.ts"))
+func (d *Dispatcher) hasCode(task *store.Task) bool {
+	_, err := os.Stat(filepath.Join(d.files.Dir(task.WorkspaceID, task.ID), "main.ts"))
 	return err == nil
 }
 
-func (d *Dispatcher) pick(taskID string) Runner {
-	if d.hasCode(taskID) {
+func (d *Dispatcher) pick(task *store.Task) Runner {
+	if d.hasCode(task) {
 		return d.node
 	}
 	return d.mock
 }
 
 func (d *Dispatcher) Start(task *store.Task, trigger string) *store.Run {
-	return d.pick(task.ID).Start(task, trigger)
+	return d.pick(task).Start(task, trigger)
 }
 
 func (d *Dispatcher) Cancel(runID string) bool {

@@ -6,9 +6,13 @@ import (
 	"path/filepath"
 )
 
-// WorkflowFS persists workflow source files on disk. Each task gets its own
-// directory keyed by task id. Phase 1 uses a flat git working tree per task;
-// Phase 2 will swap this for a per-user bare repo with proper `active` refs.
+// WorkflowFS persists workflow source files on disk. Each workspace gets its
+// own sub-tree so that files from different workspaces never share a directory:
+//
+//	<Root>/ws/<workspaceID>/workflows/<taskID>/
+//
+// Phase 1 used a flat Root/taskID layout; Phase 2 (this file) adds the
+// per-workspace isolation required by multi-tenant deployments.
 type WorkflowFS struct {
 	Root string
 }
@@ -20,14 +24,15 @@ func NewWorkflowFS(root string) (*WorkflowFS, error) {
 	return &WorkflowFS{Root: root}, nil
 }
 
-func (w *WorkflowFS) Dir(taskID string) string {
-	return filepath.Join(w.Root, taskID)
+// Dir returns the on-disk directory for a (workspace, task) pair.
+func (w *WorkflowFS) Dir(workspaceID, taskID string) string {
+	return filepath.Join(w.Root, "ws", workspaceID, "workflows", taskID)
 }
 
 // WriteFiles persists the supplied map of filename -> contents under the
 // task directory, creating it if needed. Existing files are overwritten.
-func (w *WorkflowFS) WriteFiles(taskID string, files map[string]string) error {
-	dir := w.Dir(taskID)
+func (w *WorkflowFS) WriteFiles(workspaceID, taskID string, files map[string]string) error {
+	dir := w.Dir(workspaceID, taskID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -43,8 +48,8 @@ func (w *WorkflowFS) WriteFiles(taskID string, files map[string]string) error {
 	return nil
 }
 
-func (w *WorkflowFS) ReadFile(taskID, name string) (string, error) {
-	b, err := os.ReadFile(filepath.Join(w.Dir(taskID), name))
+func (w *WorkflowFS) ReadFile(workspaceID, taskID, name string) (string, error) {
+	b, err := os.ReadFile(filepath.Join(w.Dir(workspaceID, taskID), name))
 	if errors.Is(err, os.ErrNotExist) {
 		return "", ErrNotFound
 	}

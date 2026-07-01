@@ -1032,7 +1032,8 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if _, ok := h.taskForRequest(w, r, id); !ok {
+	task, ok := h.taskForRequest(w, r, id)
+	if !ok {
 		return
 	}
 	h.archiveBeforeDelete(id)
@@ -1042,7 +1043,7 @@ func (h *Handler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	}
 	// Best-effort: remove the on-disk source so the supervisor can't pick
 	// the task back up. The archive table already has a copy.
-	_ = os.RemoveAll(h.Files.Dir(id))
+	_ = os.RemoveAll(h.Files.Dir(task.WorkspaceID, id))
 	h.Bus.Publish(store.Event{
 		Channel: "task:archived:" + auth.MustWorkspaceID(r.Context()),
 		UserID:  auth.MustWorkspaceID(r.Context()),
@@ -1061,7 +1062,7 @@ func (h *Handler) archiveBeforeDelete(id string) {
 		return
 	}
 	files := map[string]string{}
-	dir := h.Files.Dir(id)
+	dir := h.Files.Dir(t.WorkspaceID, id)
 	for _, name := range []string{"main.ts", "workflow.yaml"} {
 		if body, err := os.ReadFile(filepath.Join(dir, name)); err == nil {
 			files[name] = string(body)
@@ -1224,10 +1225,11 @@ func (h *Handler) CancelRun(w http.ResponseWriter, r *http.Request) {
 // the agent actually shipped, not what the runner created.
 func (h *Handler) GetTaskCode(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if _, ok := h.taskForRequest(w, r, id); !ok {
+	task, ok := h.taskForRequest(w, r, id)
+	if !ok {
 		return
 	}
-	dir := h.Files.Dir(id)
+	dir := h.Files.Dir(task.WorkspaceID, id)
 	if _, err := os.Stat(dir); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no code"})
 		return
@@ -1471,7 +1473,7 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 
 	existing := []generator.ExistingTask{}
 	for _, t := range h.Store.ListTasks(wsID) {
-		mainTs, _ := h.Files.ReadFile(t.ID, "main.ts")
+		mainTs, _ := h.Files.ReadFile(t.WorkspaceID, t.ID, "main.ts")
 		gtTriggers := make([]generator.Trigger, 0, len(t.Triggers))
 		for _, tr := range t.Triggers {
 			gtTriggers = append(gtTriggers, generator.Trigger{
@@ -1537,7 +1539,7 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 	activeTaskID := sessionID
 	activeIsDraft := false
 	if t, err := h.Store.GetTask(activeTaskID); err == nil {
-		main, _ := h.Files.ReadFile(activeTaskID, "main.ts")
+		main, _ := h.Files.ReadFile(t.WorkspaceID, activeTaskID, "main.ts")
 		if main == "" && len(t.Triggers) == 0 && len(t.Capabilities) == 0 {
 			activeIsDraft = true
 		}
@@ -1663,7 +1665,7 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 		for _, id := range outcome.TargetTaskIDs {
 			h.archiveBeforeDelete(id)
 			if err := h.Store.DeleteTask(id); err == nil {
-				_ = os.RemoveAll(h.Files.Dir(id))
+				_ = os.RemoveAll(h.Files.Dir(wsID, id))
 				deleted = append(deleted, id)
 				h.Bus.Publish(store.Event{
 					Channel: "task:archived:" + wsID,
@@ -1724,7 +1726,7 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(outcome.Files) > 0 {
-			if err := h.Files.WriteFiles(taskID, outcome.Files); err != nil {
+			if err := h.Files.WriteFiles(task.WorkspaceID, taskID, outcome.Files); err != nil {
 				log.Printf("update write failed: %v", err)
 			}
 			h.scheduleDryRun(taskID, sessionID, wsID)
@@ -1774,7 +1776,7 @@ func (h *Handler) ChatMessage(w http.ResponseWriter, r *http.Request) {
 			Ports:          ports,
 			HasChatHandler: hasChat,
 		})
-		if err := h.Files.WriteFiles(task.ID, outcome.Files); err != nil {
+		if err := h.Files.WriteFiles(task.WorkspaceID, task.ID, outcome.Files); err != nil {
 			log.Printf("workflow write failed: %v", err)
 		}
 		h.scheduleDryRun(task.ID, sessionID, wsID)
@@ -2111,8 +2113,8 @@ func (h *Handler) ForkTask(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	yaml, _ := h.Files.ReadFile(id, "workflow.yaml")
-	main, _ := h.Files.ReadFile(id, "main.ts")
+	yaml, _ := h.Files.ReadFile(src.WorkspaceID, id, "workflow.yaml")
+	main, _ := h.Files.ReadFile(src.WorkspaceID, id, "main.ts")
 	forkWsID := auth.MustWorkspaceID(r.Context())
 	dup := h.Store.CreateTask(&store.Task{
 		UserID:       forkWsID,
@@ -2122,7 +2124,7 @@ func (h *Handler) ForkTask(w http.ResponseWriter, r *http.Request) {
 		Capabilities: src.Capabilities,
 		Triggers:     append([]store.Trigger{}, src.Triggers...),
 	})
-	_ = h.Files.WriteFiles(dup.ID, map[string]string{"workflow.yaml": yaml, "main.ts": main})
+	_ = h.Files.WriteFiles(dup.WorkspaceID, dup.ID, map[string]string{"workflow.yaml": yaml, "main.ts": main})
 	writeJSON(w, http.StatusCreated, dup)
 }
 
@@ -2402,8 +2404,8 @@ Anything else without a slash is sent straight to the task's chat handler
 	case "archive":
 		h.archiveBeforeDelete(sessionID)
 		_ = h.Store.DeleteTask(sessionID)
-		_ = os.RemoveAll(h.Files.Dir(sessionID))
 		archiveWsID := auth.MustWorkspaceID(r.Context())
+		_ = os.RemoveAll(h.Files.Dir(archiveWsID, sessionID))
 		h.Bus.Publish(store.Event{Channel: "task:archived:" + archiveWsID, UserID: archiveWsID, TaskID: sessionID})
 		writeJSON(w, http.StatusOK, map[string]any{"sessionId": sessionID, "reply": "archived."})
 		return true
