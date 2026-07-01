@@ -54,8 +54,10 @@ export function ChatPane({
   // The App-level SSE accumulator writes deltas even when ChatPane is unmounted,
   // so on remount pending may be true with accumulated preview in the store.
   useEffect(() => {
-    if (pending && genEntry?.preview !== undefined && genEntry.preview.length > streamPreview.length) {
-      setStreamPreview(genEntry.preview);
+    if (pending && genEntry?.preview !== undefined) {
+      setStreamPreview((current) =>
+        genEntry.preview.length > current.length ? genEntry.preview : current
+      );
     }
   }, [genEntry?.preview, pending]);
 
