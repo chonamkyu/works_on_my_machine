@@ -109,6 +109,11 @@ export function App() {
 
   const [pulses, setPulses] = useState<Record<string, number>>({});
 
+  // A prompt the user picked from an example chip while no task was selected.
+  // It's carried into the ChatPane of the freshly-created task as its initial
+  // draft (the input is prefilled + focused, not auto-sent).
+  const [draftPrompt, setDraftPrompt] = useState<string | null>(null);
+
   const refresh = useCallback(async () => {
     const { tasks } = await api.listTasks();
     setTasks(tasks ?? []);
@@ -237,6 +242,8 @@ export function App() {
                 await refresh();
                 if (newId) setSelectedTaskId(newId);
               }}
+              onPromptExample={setDraftPrompt}
+              initialDraft={draftPrompt}
             />
             {paneOpen && selectedTask && (
               <UIPane
@@ -258,6 +265,17 @@ export function App() {
                 capabilities: [],
               });
               await refresh();
+              setSelectedTaskId(t.id);
+            }}
+            onPickPrompt={async (prompt) => {
+              const t = await api.createTask({
+                name: "draft",
+                description: "",
+                triggers: [],
+                capabilities: [],
+              });
+              await refresh();
+              setDraftPrompt(prompt);
               setSelectedTaskId(t.id);
             }}
           />
@@ -372,19 +390,48 @@ function AdminPage({ onBack }: { onBack: () => void }) {
   );
 }
 
-function EmptyChat({ onNewTask }: { onNewTask: () => Promise<void> }) {
+// Example prompts offered on empty chat surfaces. Clicking one spins up a
+// fresh task and seeds the chat input so the user can tweak-then-send.
+export const EXAMPLE_PROMPTS = [
+  "Summarize my GitHub notifications",
+  "Dashboard of the latest Hacker News top 5",
+  "Daily standup reminder to Slack",
+  "Scrape a page and show it as a table",
+];
+
+function EmptyChat({
+  onNewTask,
+  onPickPrompt,
+}: {
+  onNewTask: () => Promise<void>;
+  onPickPrompt: (prompt: string) => Promise<void>;
+}) {
   return (
-    <main className="flex-1 flex flex-col items-center justify-center min-w-0 text-ink-muted">
-      <p className="text-[15px] mb-4 text-ink">Pick a task on the left, or start a new one.</p>
-      <button
-        onClick={() => void onNewTask()}
-        className="h-9 px-4 rounded-md bg-accent text-white text-[13px] hover:bg-accent-hover"
-      >
-        + New task
-      </button>
-      <p className="mt-4 text-[11px] font-mono text-ink-tertiary">
-        ⌘N new · ⌘K palette · ⌘, settings · ⌘. panel · ⌘B sidebar
-      </p>
+    <main className="flex-1 flex flex-col items-center justify-center min-w-0 text-ink-muted px-6">
+      <div className="w-full max-w-md flex flex-col items-center text-center">
+        <p className="text-[15px] text-ink">Pick a task on the left, or start a new one.</p>
+        <p className="mt-1.5 text-[13px] text-ink-subtle">Try one of these to get going:</p>
+        <div className="mt-4 flex flex-wrap justify-center gap-2">
+          {EXAMPLE_PROMPTS.map((p) => (
+            <button
+              key={p}
+              onClick={() => void onPickPrompt(p)}
+              className="bg-surface-2 border border-hairline hover:border-hairline-strong hover:bg-surface-3 text-ink-muted text-[13px] rounded-md px-3 py-1.5 cursor-pointer transition-colors"
+            >
+              {p}
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={() => void onNewTask()}
+          className="mt-6 h-9 px-4 rounded-md bg-accent text-white text-[13px] font-medium hover:bg-accent-hover cursor-pointer transition-colors"
+        >
+          + New task
+        </button>
+        <p className="mt-4 text-[11px] font-mono text-ink-tertiary">
+          ⌘N new · ⌘K palette · ⌘, settings · ⌘. panel · ⌘B sidebar
+        </p>
+      </div>
     </main>
   );
 }

@@ -238,9 +238,19 @@ export function SkillsView() {
         <div className="flex-1 overflow-y-auto">
           {loading && <p className="p-3 text-xs text-ink-subtle">loading…</p>}
           {!loading && skills.length === 0 && (
-            <p className="p-3 text-xs text-ink-tertiary">
-              No skills in the registry yet. Admins can publish skills here.
-            </p>
+            <div className="px-4 py-8 flex flex-col items-center text-center gap-2">
+              <p className="text-[13px] text-ink-subtle">No skills in the registry yet.</p>
+              {isAdmin ? (
+                <button
+                  onClick={() => setShowCreateForm(true)}
+                  className="mt-1 h-7 px-3 rounded-md border border-hairline hover:bg-surface-2 hover:border-hairline-strong text-[12px] text-ink-subtle hover:text-ink flex items-center gap-1.5 cursor-pointer transition-colors"
+                >
+                  <Plus className="w-3 h-3" /> New skill
+                </button>
+              ) : (
+                <p className="text-[12px] text-ink-tertiary">An admin can publish one.</p>
+              )}
+            </div>
           )}
           {skills.map((s) => (
             <button
@@ -277,8 +287,13 @@ export function SkillsView() {
       {/* Right pane: detail */}
       <div className="flex-1 overflow-y-auto flex flex-col min-w-0">
         {!selectedName && (
-          <div className="flex-1 flex items-center justify-center">
-            <p className="text-xs text-ink-tertiary">Select a skill on the left.</p>
+          <div className="flex-1 flex flex-col items-center justify-center gap-1 text-center px-6">
+            <p className="text-[13px] text-ink-subtle">Select a skill on the left.</p>
+            <p className="text-[12px] text-ink-tertiary">
+              {skills.length === 0
+                ? isAdmin ? "Publish one with the + above to get started." : "The registry is empty."
+                : "Its versions, aliases, and body show here."}
+            </p>
           </div>
         )}
 

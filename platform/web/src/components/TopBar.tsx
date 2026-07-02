@@ -75,6 +75,12 @@ export function TopBar({ onOpenPalette, onOpenSettings, onOpenAdmin }: Props) {
     writeWsToUrl(id);
   }
 
+  // Identity chip: a circular initial avatar keyed off the user's sub, falling
+  // back to a stable placeholder before /v1/me resolves. Full sub sits in the
+  // tooltip so nothing truncates in the bar.
+  const userLabel = me?.sub ?? "nk";
+  const userInitial = (userLabel.trim()[0] ?? "n").toUpperCase();
+
   return (
     <header className="h-11 border-b border-hairline bg-canvas flex items-center px-3 gap-3 text-ink-muted">
       <span className="font-mono text-[11px] tracking-[0.14em] text-ink-subtle select-none">
@@ -87,35 +93,46 @@ export function TopBar({ onOpenPalette, onOpenSettings, onOpenAdmin }: Props) {
         onRefetch={loadWorkspaces}
       />
       <div className="flex-1" />
+      {/* Right cluster: search box, then a tidy action group. Both halves
+          share the same control height (h-7) and vertical centering; the
+          search sits a touch apart from the actions. */}
       <button
         onClick={onOpenPalette}
-        className="group h-7 px-2.5 rounded-md border border-hairline bg-surface-1 hover:border-hairline-strong flex items-center gap-2 text-[12px] text-ink-subtle"
+        className="group h-7 px-2.5 rounded-md border border-hairline bg-surface-1 hover:border-hairline-strong flex items-center gap-2 text-[12px] text-ink-subtle cursor-pointer transition-colors"
         data-testid="open-palette"
       >
         <Search className="w-3 h-3" />
         <span>Search or jump…</span>
         <kbd className="font-mono text-[10px] text-ink-tertiary border border-hairline rounded px-1 py-px ml-3">⌘K</kbd>
       </button>
-      {me?.isAdmin && onOpenAdmin && (
+      <div className="flex items-center gap-2 ml-3">
+        {me?.isAdmin && onOpenAdmin && (
+          <button
+            onClick={onOpenAdmin}
+            className="h-7 px-2 rounded-md border border-hairline hover:border-hairline-strong hover:bg-surface-2 flex items-center gap-1.5 text-ink-subtle hover:text-ink font-mono text-[11px] cursor-pointer transition-colors"
+            title="Admin dashboard"
+            data-testid="open-admin"
+          >
+            <ShieldCheck className="w-3 h-3" />
+            <span>Admin</span>
+          </button>
+        )}
         <button
-          onClick={onOpenAdmin}
-          className="h-7 px-2 rounded-md hover:bg-surface-2 flex items-center gap-1.5 text-ink-subtle hover:text-ink font-mono text-[11px] border border-hairline"
-          title="Admin dashboard"
-          data-testid="open-admin"
+          onClick={onOpenSettings}
+          className="h-7 w-7 rounded-md hover:bg-surface-2 flex items-center justify-center text-ink-subtle hover:text-ink cursor-pointer transition-colors"
+          title="Settings · ⌘,"
+          data-testid="open-settings"
         >
-          <ShieldCheck className="w-3 h-3" />
-          <span>Admin</span>
+          <Cog className="w-3.5 h-3.5" />
         </button>
-      )}
-      <button
-        onClick={onOpenSettings}
-        className="h-7 w-7 rounded-md hover:bg-surface-2 flex items-center justify-center text-ink-subtle hover:text-ink"
-        title="Settings · ⌘,"
-        data-testid="open-settings"
-      >
-        <Cog className="w-3.5 h-3.5" />
-      </button>
-      <span className="font-mono text-[11px] text-ink-tertiary pl-1">@nk</span>
+        <span
+          className="w-7 h-7 rounded-full bg-surface-3 flex items-center justify-center font-mono text-[11px] text-ink-subtle uppercase select-none"
+          title={userLabel}
+          aria-label={userLabel}
+        >
+          {userInitial}
+        </span>
+      </div>
     </header>
   );
 }

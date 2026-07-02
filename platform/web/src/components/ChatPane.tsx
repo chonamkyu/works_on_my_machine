@@ -21,6 +21,15 @@ interface Message {
   credentialRequest?: CredentialRequest;
 }
 
+// Example prompts shown in an empty session, above the input. Clicking one
+// prefills the composer (and focuses it) so the user can tweak-then-send.
+const EXAMPLE_PROMPTS = [
+  "Summarize my GitHub notifications",
+  "Dashboard of the latest Hacker News top 5",
+  "Daily standup reminder to Slack",
+  "Scrape a page and show it as a table",
+];
+
 export function ChatPane({
   sessionId,
   taskName,
@@ -30,6 +39,8 @@ export function ChatPane({
   onExpandPane,
   onRenameTask,
   onTaskCreated,
+  onPromptExample,
+  initialDraft,
 }: {
   sessionId: string;
   taskName?: string;
@@ -39,9 +50,15 @@ export function ChatPane({
   onExpandPane?: () => void;
   onRenameTask?: (name: string) => Promise<void>;
   onTaskCreated: (newId?: string) => Promise<void>;
+  // Called after an example prompt has been consumed so the parent can clear
+  // any carried-over draft.
+  onPromptExample?: (prompt: string | null) => void;
+  // A prompt carried in from the no-task-selected empty state; seeds the input.
+  initialDraft?: string | null;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState(initialDraft ?? "");
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const [pending, setPending] = useState<boolean>(() => getGeneration(sessionId)?.generating ?? false);
   const [streamPreview, setStreamPreview] = useState<string>(() => getGeneration(sessionId)?.preview ?? "");
   const [progressSteps, setProgressSteps] = useState<string[]>([]);
@@ -64,6 +81,23 @@ export function ChatPane({
       setStreamPreview(genEntry.preview);
     }
   }, [genEntry?.preview]);
+
+  // If we were handed a draft prompt from the no-task empty state, focus the
+  // composer once and let the parent know it's been consumed.
+  useEffect(() => {
+    if (initialDraft) {
+      inputRef.current?.focus();
+      onPromptExample?.(null);
+    }
+    // Run once per mount; the draft is captured into `input` initial state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Prefill the composer from an example chip and focus it (tweak-then-send).
+  const fillPrompt = (prompt: string) => {
+    setInput(prompt);
+    inputRef.current?.focus();
+  };
 
   // Tick a clock while a turn is in flight so the user can see elapsed time.
   useEffect(() => {
@@ -204,7 +238,21 @@ export function ChatPane({
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
         {messages.length === 0 && !pending && (
-          <p className="text-xs text-ink-tertiary">empty session — say something to start.</p>
+          <div className="h-full flex flex-col items-center justify-center text-center px-6">
+            <p className="text-[13px] text-ink-subtle">Empty session — say something to start.</p>
+            <p className="mt-1.5 text-[12px] text-ink-tertiary">Or try one of these:</p>
+            <div className="mt-4 flex flex-wrap justify-center gap-2 max-w-md">
+              {EXAMPLE_PROMPTS.map((p) => (
+                <button
+                  key={p}
+                  onClick={() => fillPrompt(p)}
+                  className="bg-surface-2 border border-hairline hover:border-hairline-strong hover:bg-surface-3 text-ink-muted text-[13px] rounded-md px-3 py-1.5 cursor-pointer transition-colors"
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
+          </div>
         )}
         {messages.map((m, i) => (
           <Bubble key={i} msg={m} onCredentialSaved={onCredentialSaved} />
@@ -247,6 +295,7 @@ export function ChatPane({
       <div className="border-t border-hairline p-3">
         <div className="flex items-end gap-2 bg-surface-3 border border-hairline rounded-md p-2">
           <textarea
+            ref={inputRef}
             className="flex-1 bg-transparent outline-none resize-none text-sm placeholder:text-ink-tertiary"
             placeholder="ask the agent — '@task:' to mention, '/model' to switch"
             rows={2}

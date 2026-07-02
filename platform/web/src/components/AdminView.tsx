@@ -45,13 +45,33 @@ const ADMIN_TABS: { id: AdminTab; label: string }[] = [
 // ---------------------------------------------------------------------------
 
 function CountCard({ label, value }: { label: string; value: number }) {
+  // Zero reads muted so non-zero numbers pop; the label stays a quiet mono
+  // eyebrow. No accent on the card — hairlines do the structural work.
   return (
-    <div className="border border-hairline rounded p-3 bg-canvas flex flex-col gap-1 min-w-0">
-      <span className="font-mono text-[10px] uppercase tracking-wider text-ink-tertiary truncate">
+    <div className="border border-hairline rounded-lg px-4 py-3.5 bg-surface-1 flex flex-col gap-1.5 min-w-0">
+      <span className="font-mono text-[11px] uppercase tracking-wider text-ink-tertiary truncate">
         {label}
       </span>
-      <span className="font-mono text-2xl text-ink">{value}</span>
+      <span className={clsx("font-mono text-2xl", value === 0 ? "text-ink-tertiary" : "text-ink")}>
+        {value}
+      </span>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Shared table primitives — a sticky header cell and a quiet action label.
+// Actions are LABELS, not links: render them as a mono chip, never accent.
+// ---------------------------------------------------------------------------
+
+const TH_BASE =
+  "text-left px-3 py-2 font-mono text-[10px] uppercase tracking-wider text-ink-tertiary bg-surface-1 sticky top-0 z-10";
+
+function ActionChip({ action }: { action: string }) {
+  return (
+    <span className="font-mono text-[11px] bg-surface-2 text-ink-subtle px-1.5 py-0.5 rounded whitespace-nowrap">
+      {action}
+    </span>
   );
 }
 
@@ -92,27 +112,27 @@ function OverviewTab({ overview }: { overview: AdminOverview }) {
         {recentAudit.length === 0 ? (
           <p className="text-xs text-ink-tertiary">No recent audit entries.</p>
         ) : (
-          <div className="border border-hairline rounded overflow-hidden">
+          <div className="border border-hairline rounded-lg overflow-hidden">
             <table className="w-full text-xs">
               <thead>
-                <tr className="border-b border-hairline bg-surface-2">
-                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">time</th>
-                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">actor</th>
-                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">action</th>
-                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">resource</th>
+                <tr className="border-b border-hairline">
+                  <th className={TH_BASE}>time</th>
+                  <th className={TH_BASE}>actor</th>
+                  <th className={TH_BASE}>action</th>
+                  <th className={TH_BASE}>resource</th>
                 </tr>
               </thead>
               <tbody>
                 {recentAudit.map((entry) => (
-                  <tr key={entry.id} className="border-b border-hairline last:border-0 hover:bg-surface-2/50">
-                    <td className="px-3 py-1.5 font-mono text-ink-tertiary whitespace-nowrap">
+                  <tr key={entry.id} className="border-b border-hairline last:border-0 hover:bg-surface-2">
+                    <td className="px-3 py-1.5 font-mono text-[12px] text-ink-subtle whitespace-nowrap">
                       {new Date(entry.createdAt).toLocaleString()}
                     </td>
-                    <td className="px-3 py-1.5 text-ink-muted truncate max-w-[120px]">
+                    <td className="px-3 py-1.5 text-ink truncate max-w-[120px]">
                       {entry.actorEmail || entry.actorSub}
                     </td>
-                    <td className="px-3 py-1.5 font-mono text-accent">{entry.action}</td>
-                    <td className="px-3 py-1.5 text-ink-muted truncate max-w-[160px]">
+                    <td className="px-3 py-1.5"><ActionChip action={entry.action} /></td>
+                    <td className="px-3 py-1.5 text-ink-subtle truncate max-w-[160px]">
                       {entry.resourceType}
                       {entry.resourceName ? `: ${entry.resourceName}` : ""}
                     </td>
@@ -197,15 +217,15 @@ function UsersTab() {
       <div className="font-mono text-[10px] uppercase tracking-wider text-ink-subtle mb-2">
         users · {users.length}
       </div>
-      <div className="border border-hairline rounded overflow-hidden">
+      <div className="border border-hairline rounded-lg overflow-hidden">
         <table className="w-full text-xs">
           <thead>
-            <tr className="border-b border-hairline bg-surface-2">
-              <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">email</th>
-              <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">sub</th>
-              <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">created</th>
-              <th className="px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary text-center">admin</th>
-              <th className="px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary text-center">disabled</th>
+            <tr className="border-b border-hairline">
+              <th className={TH_BASE}>email</th>
+              <th className={TH_BASE}>sub</th>
+              <th className={TH_BASE}>created</th>
+              <th className={clsx(TH_BASE, "text-center")}>admin</th>
+              <th className={clsx(TH_BASE, "text-center")}>disabled</th>
             </tr>
           </thead>
           <tbody>
@@ -213,15 +233,15 @@ function UsersTab() {
               <tr
                 key={user.sub}
                 className={clsx(
-                  "border-b border-hairline last:border-0",
+                  "border-b border-hairline last:border-0 hover:bg-surface-2",
                   user.disabled && "opacity-50",
                 )}
               >
                 <td className="px-3 py-2 text-ink">{user.email}</td>
-                <td className="px-3 py-2 font-mono text-ink-tertiary text-[10px] truncate max-w-[160px]">
+                <td className="px-3 py-2 font-mono text-ink-subtle text-[12px] truncate max-w-[160px]">
                   {user.sub}
                 </td>
-                <td className="px-3 py-2 font-mono text-ink-tertiary whitespace-nowrap">
+                <td className="px-3 py-2 font-mono text-ink-subtle text-[12px] whitespace-nowrap">
                   {new Date(user.createdAt).toLocaleDateString()}
                 </td>
                 <td className="px-3 py-2 text-center">
@@ -278,29 +298,29 @@ function WorkspacesTab() {
       <div className="font-mono text-[10px] uppercase tracking-wider text-ink-subtle mb-2">
         workspaces · {workspaces.length}
       </div>
-      <div className="border border-hairline rounded overflow-hidden">
+      <div className="border border-hairline rounded-lg overflow-hidden">
         <table className="w-full text-xs">
           <thead>
-            <tr className="border-b border-hairline bg-surface-2">
-              <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">name</th>
-              <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">kind</th>
-              <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">owner sub</th>
-              <th className="px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary text-right">members</th>
-              <th className="px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary text-right">tasks</th>
-              <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">created</th>
+            <tr className="border-b border-hairline">
+              <th className={TH_BASE}>name</th>
+              <th className={TH_BASE}>kind</th>
+              <th className={TH_BASE}>owner sub</th>
+              <th className={clsx(TH_BASE, "text-right")}>members</th>
+              <th className={clsx(TH_BASE, "text-right")}>tasks</th>
+              <th className={TH_BASE}>created</th>
             </tr>
           </thead>
           <tbody>
             {workspaces.map((ws) => (
-              <tr key={ws.id} className="border-b border-hairline last:border-0 hover:bg-surface-2/50">
+              <tr key={ws.id} className="border-b border-hairline last:border-0 hover:bg-surface-2">
                 <td className="px-3 py-2 text-ink font-medium">{ws.name}</td>
-                <td className="px-3 py-2 font-mono text-ink-tertiary">{ws.kind}</td>
-                <td className="px-3 py-2 font-mono text-ink-tertiary text-[10px] truncate max-w-[140px]">
+                <td className="px-3 py-2 font-mono text-ink-subtle text-[12px]">{ws.kind}</td>
+                <td className="px-3 py-2 font-mono text-ink-subtle text-[12px] truncate max-w-[140px]">
                   {ws.ownerSub}
                 </td>
                 <td className="px-3 py-2 font-mono text-ink text-right">{ws.memberCount}</td>
                 <td className="px-3 py-2 font-mono text-ink text-right">{ws.taskCount}</td>
-                <td className="px-3 py-2 font-mono text-ink-tertiary whitespace-nowrap">
+                <td className="px-3 py-2 font-mono text-ink-subtle text-[12px] whitespace-nowrap">
                   {new Date(ws.createdAt).toLocaleDateString()}
                 </td>
               </tr>
@@ -369,34 +389,34 @@ function AuditTab() {
       ) : filtered.length === 0 ? (
         <p className="text-xs text-ink-tertiary">No entries match the filter.</p>
       ) : (
-        <div className="border border-hairline rounded overflow-hidden">
+        <div className="border border-hairline rounded-lg overflow-hidden">
           <table className="w-full text-xs">
             <thead>
-              <tr className="border-b border-hairline bg-surface-2">
-                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary whitespace-nowrap">time</th>
-                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">actor</th>
-                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">action</th>
-                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">resource</th>
-                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">workspace</th>
+              <tr className="border-b border-hairline">
+                <th className={clsx(TH_BASE, "whitespace-nowrap")}>time</th>
+                <th className={TH_BASE}>actor</th>
+                <th className={TH_BASE}>action</th>
+                <th className={TH_BASE}>resource</th>
+                <th className={TH_BASE}>workspace</th>
               </tr>
             </thead>
             <tbody>
               {filtered.map((entry) => (
-                <tr key={entry.id} className="border-b border-hairline last:border-0 hover:bg-surface-2/50">
-                  <td className="px-3 py-1.5 font-mono text-ink-tertiary whitespace-nowrap">
+                <tr key={entry.id} className="border-b border-hairline last:border-0 hover:bg-surface-2">
+                  <td className="px-3 py-1.5 font-mono text-[12px] text-ink-subtle whitespace-nowrap">
                     {new Date(entry.createdAt).toLocaleString()}
                   </td>
-                  <td className="px-3 py-1.5 text-ink-muted truncate max-w-[140px]">
+                  <td className="px-3 py-1.5 text-ink truncate max-w-[140px]">
                     {entry.actorEmail || entry.actorSub}
                   </td>
-                  <td className="px-3 py-1.5 font-mono text-accent whitespace-nowrap">{entry.action}</td>
-                  <td className="px-3 py-1.5 text-ink-muted truncate max-w-[180px]">
+                  <td className="px-3 py-1.5"><ActionChip action={entry.action} /></td>
+                  <td className="px-3 py-1.5 text-ink-subtle truncate max-w-[180px]">
                     <span className="text-ink-tertiary">{entry.resourceType}</span>
                     {(entry.resourceName || entry.resourceId) && (
                       <span>: {entry.resourceName || entry.resourceId}</span>
                     )}
                   </td>
-                  <td className="px-3 py-1.5 font-mono text-ink-tertiary text-[10px] truncate max-w-[120px]">
+                  <td className="px-3 py-1.5 font-mono text-ink-subtle text-[12px] truncate max-w-[120px]">
                     {entry.workspaceId || "—"}
                   </td>
                 </tr>
@@ -472,19 +492,19 @@ function TriggersTab() {
       {triggers.length === 0 ? (
         <p className="text-xs text-ink-tertiary">No triggers registered across any workspace.</p>
       ) : (
-        <div className="border border-hairline rounded overflow-hidden">
+        <div className="border border-hairline rounded-lg overflow-hidden">
           <table className="w-full text-xs">
             <thead>
-              <tr className="border-b border-hairline bg-surface-2">
-                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary w-6">
+              <tr className="border-b border-hairline">
+                <th className={clsx(TH_BASE, "w-6")}>
                   {/* health dot */}
                 </th>
-                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">task</th>
-                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">workspace</th>
-                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">trigger id</th>
-                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary whitespace-nowrap">last fired</th>
-                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary whitespace-nowrap">next fire</th>
-                <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">last error</th>
+                <th className={TH_BASE}>task</th>
+                <th className={TH_BASE}>workspace</th>
+                <th className={TH_BASE}>trigger id</th>
+                <th className={clsx(TH_BASE, "whitespace-nowrap")}>last fired</th>
+                <th className={clsx(TH_BASE, "whitespace-nowrap")}>next fire</th>
+                <th className={TH_BASE}>last error</th>
               </tr>
             </thead>
             <tbody>
@@ -493,7 +513,7 @@ function TriggersTab() {
                 return (
                   <tr
                     key={`${t.taskId}:${t.triggerId}`}
-                    className="border-b border-hairline last:border-0 hover:bg-surface-2/50"
+                    className="border-b border-hairline last:border-0 hover:bg-surface-2"
                   >
                     <td className="px-3 py-2 text-center">
                       <span
@@ -504,23 +524,23 @@ function TriggersTab() {
                     <td className="px-3 py-2 text-ink font-medium truncate max-w-[160px]">
                       {t.taskName || t.taskId}
                     </td>
-                    <td className="px-3 py-2 font-mono text-ink-tertiary text-[10px] truncate max-w-[120px]">
+                    <td className="px-3 py-2 font-mono text-ink-subtle text-[12px] truncate max-w-[120px]">
                       {t.workspaceId}
                     </td>
-                    <td className="px-3 py-2 font-mono text-ink-tertiary text-[10px] truncate max-w-[140px]">
+                    <td className="px-3 py-2 font-mono text-ink-subtle text-[12px] truncate max-w-[140px]">
                       {t.triggerId}
                     </td>
-                    <td className="px-3 py-2 font-mono text-ink-tertiary whitespace-nowrap">
+                    <td className="px-3 py-2 font-mono text-ink-subtle text-[12px] whitespace-nowrap">
                       {t.lastFiredAt
                         ? new Date(t.lastFiredAt).toLocaleString()
                         : <span className="text-ink-tertiary/50">—</span>}
                     </td>
-                    <td className="px-3 py-2 font-mono text-ink-tertiary whitespace-nowrap">
+                    <td className="px-3 py-2 font-mono text-ink-subtle text-[12px] whitespace-nowrap">
                       {t.nextFireAt
                         ? new Date(t.nextFireAt).toLocaleString()
                         : <span className="text-ink-tertiary/50">—</span>}
                     </td>
-                    <td className="px-3 py-2 text-red-500 truncate max-w-[200px]" title={t.lastError || undefined}>
+                    <td className="px-3 py-2 text-status-failed truncate max-w-[200px]" title={t.lastError || undefined}>
                       {t.lastError || <span className="text-ink-tertiary/50">—</span>}
                     </td>
                   </tr>
@@ -679,23 +699,23 @@ function SelfEvolveTab() {
         {(recentSkillVersions ?? []).length === 0 ? (
           <p className="text-xs text-ink-tertiary">No skills in registry.</p>
         ) : (
-          <div className="border border-hairline rounded overflow-hidden">
+          <div className="border border-hairline rounded-lg overflow-hidden">
             <table className="w-full text-xs">
               <thead>
-                <tr className="border-b border-hairline bg-surface-2">
-                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">name</th>
-                  <th className="px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary text-right">version</th>
-                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">description</th>
-                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">updated</th>
+                <tr className="border-b border-hairline">
+                  <th className={TH_BASE}>name</th>
+                  <th className={clsx(TH_BASE, "text-right")}>version</th>
+                  <th className={TH_BASE}>description</th>
+                  <th className={TH_BASE}>updated</th>
                 </tr>
               </thead>
               <tbody>
                 {(recentSkillVersions ?? []).map((s) => (
-                  <tr key={s.id} className="border-b border-hairline last:border-0 hover:bg-surface-2/50">
+                  <tr key={s.id} className="border-b border-hairline last:border-0 hover:bg-surface-2">
                     <td className="px-3 py-2 font-mono text-ink font-medium">{s.name}</td>
                     <td className="px-3 py-2 font-mono text-ink text-right">v{s.latestVersion}</td>
-                    <td className="px-3 py-2 text-ink-muted truncate max-w-[240px]">{s.description}</td>
-                    <td className="px-3 py-2 font-mono text-ink-tertiary whitespace-nowrap">
+                    <td className="px-3 py-2 text-ink-subtle truncate max-w-[240px]">{s.description}</td>
+                    <td className="px-3 py-2 font-mono text-ink-subtle text-[12px] whitespace-nowrap">
                       {new Date(s.updatedAt).toLocaleDateString()}
                     </td>
                   </tr>
@@ -714,26 +734,26 @@ function SelfEvolveTab() {
         {(evolutionPRs ?? []).length === 0 ? (
           <p className="text-xs text-ink-tertiary">No evolution PRs yet.</p>
         ) : (
-          <div className="border border-hairline rounded overflow-hidden">
+          <div className="border border-hairline rounded-lg overflow-hidden">
             <table className="w-full text-xs">
               <thead>
-                <tr className="border-b border-hairline bg-surface-2">
-                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">id</th>
-                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">task</th>
-                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">state</th>
-                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">reason</th>
-                  <th className="text-left px-3 py-1.5 font-mono text-[10px] uppercase text-ink-tertiary">created</th>
+                <tr className="border-b border-hairline">
+                  <th className={TH_BASE}>id</th>
+                  <th className={TH_BASE}>task</th>
+                  <th className={TH_BASE}>state</th>
+                  <th className={TH_BASE}>reason</th>
+                  <th className={TH_BASE}>created</th>
                 </tr>
               </thead>
               <tbody>
                 {(evolutionPRs ?? []).map((pr) => {
                   const stateCls = STATUS_BADGE[pr.state] ?? "bg-surface-2 text-ink-muted";
                   return (
-                    <tr key={pr.id} className="border-b border-hairline last:border-0 hover:bg-surface-2/50">
-                      <td className="px-3 py-2 font-mono text-ink-tertiary text-[10px] truncate max-w-[100px]">
+                    <tr key={pr.id} className="border-b border-hairline last:border-0 hover:bg-surface-2">
+                      <td className="px-3 py-2 font-mono text-ink-subtle text-[12px] truncate max-w-[100px]">
                         {pr.id}
                       </td>
-                      <td className="px-3 py-2 font-mono text-ink-tertiary text-[10px] truncate max-w-[120px]">
+                      <td className="px-3 py-2 font-mono text-ink-subtle text-[12px] truncate max-w-[120px]">
                         {pr.taskId}
                       </td>
                       <td className="px-3 py-2">
@@ -741,8 +761,8 @@ function SelfEvolveTab() {
                           {pr.state}
                         </span>
                       </td>
-                      <td className="px-3 py-2 text-ink-muted truncate max-w-[200px]">{pr.reason}</td>
-                      <td className="px-3 py-2 font-mono text-ink-tertiary whitespace-nowrap">
+                      <td className="px-3 py-2 text-ink-subtle truncate max-w-[200px]">{pr.reason}</td>
+                      <td className="px-3 py-2 font-mono text-ink-subtle text-[12px] whitespace-nowrap">
                         {new Date(pr.createdAt).toLocaleDateString()}
                       </td>
                     </tr>
@@ -812,7 +832,7 @@ export function AdminView() {
             key={t.id}
             onClick={() => setActiveTab(t.id)}
             className={clsx(
-              "h-9 px-3 text-xs rounded-t transition-colors",
+              "h-9 px-3 text-xs rounded-t cursor-pointer transition-colors",
               activeTab === t.id
                 ? "text-ink border-b-2 border-accent -mb-px"
                 : "text-ink-muted hover:text-ink",

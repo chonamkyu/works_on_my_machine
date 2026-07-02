@@ -51,18 +51,18 @@ export function SettingsOverlay({ open, tab, onTab, onClose }: Props) {
       onClick={onClose}
     >
       <div
-        className="w-full max-w-5xl h-[80vh] rounded-lg border border-hairline bg-surface-1 shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)] flex overflow-hidden"
+        className="w-full max-w-4xl h-[80vh] rounded-xl bg-surface-1 ring-1 ring-hairline shadow-[0_24px_70px_-24px_rgba(0,0,0,0.9)] flex overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
-        <aside className="w-48 border-r border-hairline px-2 py-4 flex flex-col gap-0.5">
-          <div className="px-3 pb-3 font-mono text-[10px] uppercase tracking-wider text-ink-tertiary">
+        <aside className="w-52 border-r border-hairline px-2 py-4 flex flex-col gap-0.5">
+          <div className="px-2.5 pb-3 font-mono text-[10px] uppercase tracking-wider text-ink-tertiary">
             preferences
           </div>
           {TABS.map((t) => (
             <button
               key={t.id}
               onClick={() => onTab(t.id)}
-              className={`text-left px-3 h-8 rounded text-sm flex items-center justify-between ${
+              className={`text-left px-2.5 h-8 rounded-md text-sm flex items-center justify-between cursor-pointer transition-colors ${
                 tab === t.id ? "bg-surface-3 text-ink" : "text-ink-muted hover:bg-surface-2"
               }`}
             >
@@ -70,7 +70,7 @@ export function SettingsOverlay({ open, tab, onTab, onClose }: Props) {
               <span className="font-mono text-[10px] text-ink-tertiary">{t.hint}</span>
             </button>
           ))}
-          <div className="mt-auto px-3 pt-4 font-mono text-[10px] text-ink-tertiary">
+          <div className="mt-auto px-2.5 pt-4 font-mono text-[10px] text-ink-tertiary">
             esc to close
           </div>
         </aside>

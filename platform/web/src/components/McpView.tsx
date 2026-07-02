@@ -66,7 +66,7 @@ function HealthBadge({ status }: { status: string }) {
   const isOk = lower === "ok";
   const isUnreachable = lower === "unreachable" || lower === "error" || lower === "timeout";
   const cls = isOk
-    ? "bg-status-success/20 text-status-success border-status-success/30"
+    ? "bg-status-running/20 text-status-running border-status-running/30"
     : isUnreachable
     ? "bg-status-failed/20 text-status-failed border-status-failed/30"
     : "bg-surface-2 text-ink-tertiary border-hairline";
@@ -336,9 +336,23 @@ export function McpView() {
         <div className="flex-1 overflow-y-auto">
           {loading && <p className="p-3 text-xs text-ink-subtle">loading…</p>}
           {!loading && servers.length === 0 && (
-            <p className="p-3 text-xs text-ink-tertiary">
-              No MCP servers registered yet. Admins can register servers here.
-            </p>
+            <div className="px-4 py-8 flex flex-col items-center text-center gap-2">
+              <p className="text-[13px] text-ink-subtle">No MCP servers registered yet.</p>
+              {isAdmin ? (
+                <button
+                  onClick={() => {
+                    setShowRegisterForm(true);
+                    setEditMode(false);
+                    setForm(EMPTY_FORM);
+                  }}
+                  className="mt-1 h-7 px-3 rounded-md border border-hairline hover:bg-surface-2 hover:border-hairline-strong text-[12px] text-ink-subtle hover:text-ink flex items-center gap-1.5 cursor-pointer transition-colors"
+                >
+                  <Plus className="w-3 h-3" /> Register server
+                </button>
+              ) : (
+                <p className="text-[12px] text-ink-tertiary">An admin can register one.</p>
+              )}
+            </div>
           )}
           {servers.map((s) => (
             <button
@@ -377,8 +391,13 @@ export function McpView() {
       {/* Right pane: detail */}
       <div className="flex-1 overflow-y-auto flex flex-col min-w-0">
         {!selectedServer && (
-          <div className="flex-1 flex items-center justify-center">
-            <p className="text-xs text-ink-tertiary">Select an MCP server on the left.</p>
+          <div className="flex-1 flex flex-col items-center justify-center gap-1 text-center px-6">
+            <p className="text-[13px] text-ink-subtle">Select an MCP server on the left.</p>
+            <p className="text-[12px] text-ink-tertiary">
+              {servers.length === 0
+                ? isAdmin ? "Register one with the + above to get started." : "The registry is empty."
+                : "Its info, tools, and health show here."}
+            </p>
           </div>
         )}
 
@@ -437,7 +456,7 @@ export function McpView() {
                   className={clsx(
                     "border rounded p-3 text-xs font-mono",
                     pingResult.status === "ok"
-                      ? "border-status-success/30 bg-status-success/10 text-status-success"
+                      ? "border-status-running/30 bg-status-running/10 text-status-running"
                       : "border-status-failed/30 bg-status-failed/10 text-status-failed",
                   )}
                 >
@@ -560,7 +579,7 @@ export function McpView() {
                                 className={clsx(
                                   "flex items-center gap-1 h-6 px-2 rounded text-[11px] disabled:opacity-50",
                                   t.disabled
-                                    ? "text-status-success hover:bg-surface-2"
+                                    ? "text-status-running hover:bg-surface-2"
                                     : "text-status-failed/80 hover:bg-surface-2",
                                 )}
                               >
